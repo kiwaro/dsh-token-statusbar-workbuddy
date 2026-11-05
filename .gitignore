@@ -1,0 +1,9 @@
+node_modules/
+lib/
+.workspace/
+coverage/
+*.bak
+*.tgz
+*.jsonl
+.env
+.env.*

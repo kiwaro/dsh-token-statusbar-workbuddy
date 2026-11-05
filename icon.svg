@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Token usage status bar">
+  <defs>
+    <linearGradient id="tsb-bolt" x1="26" y1="6" x2="38" y2="30" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f6c445"/>
+      <stop offset="1" stop-color="#e08a00"/>
+    </linearGradient>
+  </defs>
+
+  <!-- bolt: generation speed -->
+  <path d="M35.2 5.5 22.6 31h8.1l-2.4 17.2 13.1-26.4h-8.2l2-16.3z"
+        fill="url(#tsb-bolt)" stroke="#1f2430" stroke-width="2" stroke-linejoin="round"/>
+
+  <!-- three stacked segments: system / tools / conversation -->
+  <rect x="8" y="43" width="16" height="5" rx="2.5" fill="#6366f1"/>
+  <rect x="27" y="43" width="10" height="5" rx="2.5" fill="#f59e0b"/>
+  <rect x="40" y="43" width="16" height="5" rx="2.5" fill="#22c55e"/>
+
+  <!-- occupancy track with a used portion -->
+  <rect x="8" y="52" width="48" height="5" rx="2.5" fill="#c9c9d1"/>
+  <rect x="8" y="52" width="30" height="5" rx="2.5" fill="#4a5568"/>
+</svg>
