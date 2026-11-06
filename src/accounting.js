@@ -28,10 +28,11 @@ export function estimateCredit(model, usage, time, quote) {
   return { credits: Number((cny * calibration.factor).toFixed(2)), cny, factor: calibration.factor, source: 'sample-calibration' };
 }
 
-export function summarizeSession(text, records, createdAt, quote, now = Date.now()) {
+export function summarizeSession(text, records, createdAt, quote, now = Date.now(), isPeak = () => false) {
   const dayStart = Math.floor((now + 28800000) / 86400000) * 86400000 - 28800000;
   let todayActual = 0, todayEstimated = 0;
   const responses = new Map();
+  const todayModels = {};
   for (const line of text.split('\n')) {
     try {
       const event = JSON.parse(line);
@@ -42,14 +43,38 @@ export function summarizeSession(text, records, createdAt, quote, now = Date.now
       responses.set(response.responseId, { event, response });
     } catch {}
   }
-  const result = { expected: responses.size, matched: 0, models: {}, estimated: 0, estimatedCount: 0, checked: 0, mismatch: 0, actual: 0, displayTotal: 0, unresolved: 0, estimateSource: 'sample-calibration', actualRecords: [] };
+  const result = { expected: responses.size, matched: 0, models: {}, turns: {}, estimated: 0, estimatedCount: 0, checked: 0, mismatch: 0, actual: 0, displayTotal: 0, unresolved: 0, estimateSource: 'sample-calibration', actualRecords: [] };
   for (const [id, {event, response}] of responses) {
     const model = response.model || 'unknown';
     const row = result.models[model] ||= { credits: 0, estimated: 0, displayCredits: 0, count: 0, estimatedCount: 0, tokens: 0 };
     const usage = event.data?.usage;
     const estimate = estimateCredit(model, usage, Number(event.time), quote);
     const actual = records.get(id);
+    const addUsage = target => {
+      const tokens = ['inputTokens','cacheReadTokens','cacheWriteTokens','outputTokens'].reduce((sum,key)=>sum+Math.max(0,Number(usage?.[key])||0),0);
+      target.tokens = (target.tokens || 0) + tokens;
+      const period = isPeak(Number(event.time)) ? 'peakTokens' : 'offTokens';
+      target[period] = (target[period] || 0) + tokens;
+      const cost = usage ? quote(model,usage,Number(event.time)) : null;
+      target.cny = (target.cny || 0) + (Number.isFinite(cost) ? cost : 0);
+    };
+    const turnId = event.data?.turn;
+    if (Number.isInteger(turnId) && turnId >= 0 && (actual || estimate)) {
+      const turn = result.turns[turnId] ||= { total: 0, models: {} };
+      const credits = actual ? actual.c : estimate.credits;
+      turn.total = amount(turn.total + credits);
+      const modelRow = turn.models[model] ||= { credits: 0, count: 0 };
+      modelRow.credits = amount(modelRow.credits + credits);
+      modelRow.count++;
+      addUsage(modelRow);
+    }
     const today = Number(event.time) >= dayStart && Number(event.time) <= now;
+    if (today && (actual || estimate)) {
+      const todayRow = todayModels[model] ||= { credits: 0, count: 0 };
+      todayRow.credits += actual ? actual.c : estimate.credits;
+      todayRow.count++;
+      addUsage(todayRow);
+    }
     if (actual) {
       if (today) todayActual += actual.c;
       result.actual += actual.c; result.matched++; row.credits += actual.c; row.count++;
@@ -68,6 +93,7 @@ export function summarizeSession(text, records, createdAt, quote, now = Date.now
     row.displayCredits = amount(row.credits + row.estimated);
   }
   result.displayTotal = amount(Object.values(result.models).reduce((sum,row) => sum + row.displayCredits, 0));
+  result.todayModels = Object.fromEntries(Object.entries(todayModels).map(([model, row]) => [model, {...row, credits: amount(row.credits)}]));
   result.todayActual = amount(todayActual);
   result.todayEstimated = amount(todayEstimated);
   result.todayTotal = amount(todayActual + todayEstimated);

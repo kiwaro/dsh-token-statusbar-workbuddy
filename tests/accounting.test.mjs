@@ -43,8 +43,25 @@ test('session today follows Beijing midnight and excludes other sessions', () =>
     event('today','deepseek-v4.1-flash',midnight),
     event('estimated','deepseek-v4.1-flash',midnight+1),
   ].join('\n'),records,null,quote,now);
+  assert.equal(summary.todayModels['deepseek-v4.1-flash'].credits,3);
+  assert.equal(summary.todayModels['deepseek-v4.1-flash'].count,2);
   assert.equal(summary.todayActual,2);
   assert.equal(summary.todayEstimated,1);
   assert.equal(summary.todayTotal,3);
   assert.equal(summary.displayTotal,13);
+});
+
+test('turn credits deduplicate responses and replace estimates within each turn', () => {
+ const e=(id,turn)=>{const value=JSON.parse(event(id));value.data.turn=turn;return JSON.stringify(value);};
+ const text=[e('old',1),e('a',2),e('a',2),e('b',2)].join('\n');
+ const records=parseJournal([{r:'old',c:90,t:100},{r:'a',c:2,t:100}].map(JSON.stringify).join('\n'));
+ const first=summarizeSession(text,records,null,quote);
+ assert.equal(first.turns[1].total,90);
+ assert.equal(first.turns[2].total,3);
+ assert.equal(first.turns[2].models['deepseek-v4.1-flash'].count,2);
+ assert.equal(first.turns[2].models['deepseek-v4.1-flash'].tokens,2020);
+ assert.equal(first.turns[2].models['deepseek-v4.1-flash'].offTokens,2020);
+ assert.equal(first.turns[2].models['deepseek-v4.1-flash'].cny,0.14);
+ records.set('b',{r:'b',c:4,t:101});
+ assert.equal(summarizeSession(text,records,null,quote).turns[2].total,6);
 });

@@ -5,6 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { estimateCredit, parseJournal, summarizeSession, actualInWindow } from './accounting.js';
 import { dshHome, storageDir } from './storage.js';
+import { reportDiagnostic } from './diagnostics.js';
+import { priceBook, bucketCost, isPeakInstant, readPricingCalendar } from './pricing.js';
+import { reconcileAccounts, appendReconciliationLog, readReconciliation, startBalanceSampler } from './reconciliation.js';
 
 /** Loopback base of THIS DSH host — the bridge routes live on the same server. */
 // Independent bridge plugins expose different catalog routes. Actual credits use the connect journal.
@@ -41,7 +44,7 @@ const LEDGER_VERSION = 1;
  * user's own conversation is undetectable, while a slow number is merely slow.
  */
 /** Cache format version. Bumped when the key or payload shape changes, so old entries are discarded. */
-const CACHE_VERSION = 2;
+const CACHE_VERSION = 5;
 
 /** How long a cached payload stays usable. Credits accrue continuously, so this bounds how stale a
  *  figure can be, not just whether its pricing period still matches. */
@@ -106,7 +109,7 @@ function payloadKey(request, nowMs) {
   // The account belongs in the key too: the balance and model list are per account, so after a switch the
   // previous account's entry would otherwise stay readable for a full minute.
   const account = typeof request.account === 'string' && request.account !== '' ? request.account : '';
-  return 'accounting-v2-session-day|' + account + '|' + model + '|' + period + '|' + list.join(',');
+  return 'accounting-v2-session-day|' + account + '|' + model + '|' + period + '|' + list.join(',') + ';calendar=' + JSON.stringify(readPricingCalendar());
 }
 
 /**
@@ -220,13 +223,14 @@ function quoteUsage(model, usage, time) {
   return bucketCost({ uncached: usage.inputTokens || 0, cacheRead: usage.cacheReadTokens || 0, cacheWrite: usage.cacheWriteTokens || 0, output: usage.outputTokens || 0 }, rate);
 }
 function estimateResponseCredit(model, usage, time) { return estimateCredit(model, usage, time, quoteUsage); }
-function readResponseCredits() {
+function readResponseCredits({ strict = false } = {}) {
   try { return parseJournal(fs.readFileSync(path.join(dshHome(), 'storages', 'dsh-connect-workbuddy', 'response-credits.jsonl'), 'utf8')); }
-  catch { return new Map(); }
+  catch (error) { if(error.code !== 'ENOENT') { reportDiagnostic('response-credits-read',error); if(strict) throw error; } return new Map(); }
 }
 function importExactCredits(ledger, sessionId, readings = readResponseCredits(), now = Date.now()) {
   const file = sessionLogPath(sessionId);
-  const summary = summarizeSession(file ? readTranscript(file) : '', readings, sessionCreatedAt(sessionId), quoteUsage, now);
+  const summary = summarizeSession(file ? readTranscript(file) : '', readings, sessionCreatedAt(sessionId), quoteUsage, now, isPeakInstant);
+  if (summary.checked >= 5 && summary.mismatch / summary.checked >= 0.25) reportDiagnostic('credit-calibration-review', {code:'EDRIFT'});
   for (const record of summary.actualRecords) appendLedger(ledger, sessionId, { [record.r]: record.c }, record.t);
   const { actualRecords, ...coverage } = summary;
   return coverage;
@@ -389,14 +393,7 @@ function parseClock(value) {
 /** Label shown while a prose-rule promotion is outside its discount window. */
 const PEAK_BADGE_LABEL = '高峰';
 
-function isDeepseekPeak(nowMs) {
-  const cst = new Date(nowMs + 8 * 3600 * 1000);
-  const day = cst.getUTCDay();
-  if (day === 0 || day === 6) return false;
-  const minutes = cst.getUTCHours() * 60 + cst.getUTCMinutes();
-  const inRange = (startHour, endHour) => minutes >= startHour * 60 && minutes < endHour * 60;
-  return inRange(9, 12) || inRange(14, 18);
-}
+const isDeepseekPeak = isPeakInstant;
 
 /**
  * Whether a promotion's discount is in force right now.
@@ -805,83 +802,6 @@ function selectedModelId(models, requested) {
  * @param {number} toMs
  * @returns {number}
  */
-const PERIOD_PRICES = {
-  'deepseek-v4.1-flash': {
-    off: { input: 1, cacheHit: 0.02, cacheWrite: 1, output: 4 },
-    peak: { input: 2, cacheHit: 0.04, cacheWrite: 2, output: 8 },
-  },
-  'deepseek-v4-flash': {
-    off: { input: 1, cacheHit: 0.02, cacheWrite: 1, output: 4 },
-    peak: { input: 2, cacheHit: 0.04, cacheWrite: 2, output: 8 },
-  },
-  'deepseek-v4-pro': {
-    off: { input: 4.5, cacheHit: 0.15, cacheWrite: 4.5, output: 13.5 },
-    peak: { input: 9, cacheHit: 0.3, cacheWrite: 9, output: 27 },
-  },
-  // Single-rate models: both periods carry the same figures, so the peak/off distinction has no effect.
-  // Listed explicitly so priceBook never falls back to the DeepSeek rate for them.
-  'glm-5.3': { off: { input: 8, cacheHit: 2, cacheWrite: 2, output: 28 }, peak: { input: 8, cacheHit: 2, cacheWrite: 2, output: 28 } },
-  'glm-5.3-flash': { off: { input: 0.8, cacheHit: 0.23, cacheWrite: 0.23, output: 2.8 }, peak: { input: 0.8, cacheHit: 0.23, cacheWrite: 0.23, output: 2.8 } },
-  'glm-5.3-flashx': { off: { input: 2, cacheHit: 0.57, cacheWrite: 0.57, output: 7 }, peak: { input: 2, cacheHit: 0.57, cacheWrite: 0.57, output: 7 } },
-  'glm-5.2': { off: { input: 8, cacheHit: 2, cacheWrite: 2, output: 28 }, peak: { input: 8, cacheHit: 2, cacheWrite: 2, output: 28 } },
-  'glm-5.1': { off: { input: 6, cacheHit: 1.3, cacheWrite: 1.3, output: 24 }, peak: { input: 6, cacheHit: 1.3, cacheWrite: 1.3, output: 24 } },
-  'glm-5.0-turbo': { off: { input: 5, cacheHit: 1.2, cacheWrite: 1.2, output: 22 }, peak: { input: 5, cacheHit: 1.2, cacheWrite: 1.2, output: 22 } },
-  'glm-5v-turbo': { off: { input: 5, cacheHit: 1.2, cacheWrite: 1.2, output: 22 }, peak: { input: 5, cacheHit: 1.2, cacheWrite: 1.2, output: 22 } },
-  'glm-4.6v': { off: { input: 1, cacheHit: 0.2, cacheWrite: 0.2, output: 3 }, peak: { input: 1, cacheHit: 0.2, cacheWrite: 0.2, output: 3 } },
-  'kimi-k3.1-pro': { off: { input: 13, cacheHit: 1.3, cacheWrite: 13, output: 68 }, peak: { input: 13, cacheHit: 1.3, cacheWrite: 13, output: 68 } },
-  'kimi-k3.1-pro-highspeed': { off: { input: 26, cacheHit: 1.3, cacheWrite: 26, output: 136 }, peak: { input: 26, cacheHit: 1.3, cacheWrite: 26, output: 136 } },
-  'kimi-k3-2': { off: { input: 20, cacheHit: 2, cacheWrite: 20, output: 100 }, peak: { input: 20, cacheHit: 2, cacheWrite: 20, output: 100 } },
-  'minimax-m3-pay': { off: { input: 4.2, cacheHit: 0.84, cacheWrite: 0.84, output: 16.8 }, peak: { input: 4.2, cacheHit: 0.84, cacheWrite: 0.84, output: 16.8 } },
-  'minimax-m3.1-flash': { off: { input: 1, cacheHit: 0.1, cacheWrite: 0.1, output: 4 }, peak: { input: 1, cacheHit: 0.1, cacheWrite: 0.1, output: 4 } },
-  'step-5-preview': { off: { input: 7, cacheHit: 0.7, cacheWrite: 0.7, output: 20 }, peak: { input: 7, cacheHit: 0.7, cacheWrite: 0.7, output: 20 } },
-  'mimo-v2.6-pro': { off: { input: 3, cacheHit: 0.025, cacheWrite: 0.025, output: 6 }, peak: { input: 3, cacheHit: 0.025, cacheWrite: 0.025, output: 6 } },
-};
-
-/** The rate book for a model, falling back to the flash rate when the model is unpriced. */
-function priceBook(modelId) {
-  const direct = PERIOD_PRICES[modelId];
-  if (direct !== undefined) return direct;
-  // Strip a provider prefix such as "workbuddy/" before giving up.
-  if (typeof modelId === 'string') {
-    const tail = modelId.slice(modelId.lastIndexOf('/') + 1);
-    if (PERIOD_PRICES[tail] !== undefined) return PERIOD_PRICES[tail];
-  }
-  // Unknown model: fall back to the cheapest known book so a figure still appears, but the caller can tell
-  // it was a fallback by comparing the id against the table.
-  return PERIOD_PRICES['deepseek-v4.1-flash'];
-}
-
-/**
- * Cost in CNY of one period's buckets.
- *
- * @param {{uncached: number, cacheRead: number, cacheWrite: number, output: number}} bucket
- * @param {{input: number, cacheHit: number, cacheWrite: number, output: number}} rate
- * @returns {number}
- */
-function bucketCost(bucket, rate) {
-  return (
-    bucket.uncached * rate.input
-    + bucket.cacheRead * rate.cacheHit
-    + bucket.cacheWrite * rate.cacheWrite
-    + bucket.output * rate.output
-  ) / 1e6;
-}
-
-/**
- * Weighted CNY cost of a period split, priced per bucket and per period.
- *
- * @param {{peak: object, off: object}|null} split
- * @param {string} modelId
- * @returns {number}
- */
-function isPeakInstant(ms) {
-  const cst = new Date(ms + 8 * 3600 * 1000);
-  const day = cst.getUTCDay();
-  if (day === 0 || day === 6) return false;
-  const minutes = cst.getUTCHours() * 60 + cst.getUTCMinutes();
-  return (minutes >= 9 * 60 && minutes < 12 * 60) || (minutes >= 14 * 60 && minutes < 18 * 60);
-}
-
 /**
  * Find one session's transcript across every workspace directory.
  *
@@ -998,6 +918,7 @@ function splitSessionByPeriod(sessionId) {
   const file = sessionLogPath(sessionId);
   if (file === null) return null;
 
+  const calendarKey = JSON.stringify(readPricingCalendar());
   let cached = TRANSCRIPT_CACHE.get(file);
   if (cached === undefined) {
     let stamp = 0;
@@ -1017,8 +938,9 @@ function splitSessionByPeriod(sessionId) {
   } catch (_error) {
     /* keep the previous stamp */
   }
-  if (cached.split !== null && currentStamp === cached.stamp) return cached.split;
+  if (cached.split !== null && currentStamp === cached.stamp && cached.calendarKey === calendarKey) return cached.split;
 
+  cached.calendarKey = calendarKey;
   const text = readTranscript(file);
   if (text === '') return null;
 
@@ -1214,6 +1136,7 @@ function round3(n) {
  * @param {string|undefined} sessionId
  */
 export const __test = {
+  reconcileAccounts, appendReconciliationLog, reportDiagnostic,
   quoteUsage, estimateResponseCredit, payloadKey, readPayloadCache,
   isDeepseekPeak,
   discountInForce,
@@ -1439,49 +1362,6 @@ function mostRecentlyActiveSession() {
   return best;
 }
 
-function reconciliationPath() { return path.join(storageDir(), 'account-reconciliation.json'); }
-function readReconciliation() {
- try { return JSON.parse(fs.readFileSync(reconciliationPath(), 'utf8')); } catch { return {accounts:{},at:null}; }
-}
-function reconcileAccounts(accounts, previous, records, now) {
- const next = { accounts: {...previous.accounts}, at:now };
- for(const account of accounts) {
-  if(typeof account.id!=='string' || typeof account.credits!=='number' || !Number.isFinite(account.credits)) continue;
-  const old=previous.accounts?.[account.id];
-  let observed=0; const seen=new Set();
-  if(old) for(const r of records) {
-   if(r.a===account.id && r.t>old.at && r.t<=now && typeof r.r==='string' && !seen.has(r.r) && Number.isFinite(r.c) && r.c>=0) {seen.add(r.r);observed+=r.c;}
-  }
-  const drop=old ? old.balance-account.credits : null;
-  next.accounts[account.id]={balance:account.credits,at:now,previousAt:old?.at ?? null,balanceDrop:drop,observedCredit:Number(observed.toFixed(4)),difference:drop===null?null:Number((drop-observed).toFixed(4)),source:'balance-observation'};
- }
- return next;
-}
-function startBalanceSampler(intervalMs, resolveBase) {
- let running=false,stopped=false;
- const tick=async()=>{
-  if(running || stopped)return;running=true;
-  try {
-   const accounts=[];
-   for(const region of ['cn','global']) {
-    try {
-    const response=await fetch(resolveBase()+'/plugins/dsh-connect-workbuddy/account-credits?region='+region,{signal:AbortSignal.timeout(15000)});
-    if(response.ok){ const page=await response.json(); if(Array.isArray(page.accounts))accounts.push(...page.accounts); }
-    } catch {}
-   }
-   if(!accounts.length || stopped)return;
-   let records=[];
-   try { records=fs.readFileSync(path.join(dshHome(),'storages','dsh-connect-workbuddy','response-credits.jsonl'),'utf8').split('\n').flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}}); }catch{}
-   const next=reconcileAccounts(accounts,readReconciliation(),records,Date.now());
-   fs.mkdirSync(storageDir(),{recursive:true});
-   fs.appendFileSync(path.join(storageDir(),'account-reconciliation.jsonl'),JSON.stringify(next)+'\n','utf8');
-   fs.writeFileSync(reconciliationPath(),JSON.stringify(next),'utf8');
-  }catch{}finally{running=false;}
- };
- const timer=setInterval(()=>void tick(),intervalMs);if(typeof timer.unref==='function')timer.unref();void tick();
- return ()=>{stopped=true;clearInterval(timer);};
-}
-
 export function apply(ctx) {
   ctx.inject(['webServer'], (scope) => {
     // Sample the balance on the host's own clock so the ledger keeps filling while the UI is closed.
@@ -1497,7 +1377,7 @@ export function apply(ctx) {
       }
       return 'http://127.0.0.1';
     };
-    ctx.effect(() => startBalanceSampler(60000, resolveBase), 'dsh-token-statusbar-workbuddy: balance reconciliation');
+    ctx.effect(() => startBalanceSampler(60000, resolveBase, () => readResponseCredits({strict:true})), 'dsh-token-statusbar-workbuddy: balance reconciliation');
 
     const stop = scope.webServer.register({
       kind: 'exact',

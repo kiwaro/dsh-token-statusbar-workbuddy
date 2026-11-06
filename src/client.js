@@ -48,20 +48,7 @@ window.__ModuleLoader__.load({
       context: true,
       promo: true,
       credits: true,
-      // Which number the ◈ chip shows. The three are different by nature:
-      // "today" spans every conversation in this DSH, "session" is the current
-      // one, "balance" is what the account has left — so the chip must not
-      // silently pick one.
-      creditScope: 'session',
     };
-
-    /** The credit scopes the chip can display, in menu order. */
-    const CREDIT_SCOPES = ['session', 'today', 'balance'];
-
-    /** Whether `value` is one of {@link CREDIT_SCOPES}. */
-    function isCreditScope(value) {
-      return typeof value === 'string' && CREDIT_SCOPES.indexOf(value) >= 0;
-    }
 
     const EN = {
       'chart.sessionScope': 'This session',
@@ -91,10 +78,6 @@ window.__ModuleLoader__.load({
       'seg.credits': 'Credits',
       'prefs.promo': 'Plan promotion badge',
       'prefs.credits': 'Credits spent',
-      'prefs.creditScope': 'Credits field shows',
-      'prefs.creditScope.session': 'This session',
-      'prefs.creditScope.today': 'Today (all sessions)',
-      'prefs.creditScope.balance': 'Balance left',
       'tip.promo': 'Promotion',
       'promo.window': 'Applies',
       'promo.allDay': 'All day',
@@ -139,7 +122,6 @@ window.__ModuleLoader__.load({
       'tip.ctxMessages': 'Conversation',
       'tip.ctxUsed': 'Context used',
       'tip.today': 'Today (all sessions)',
-      'tip.creditScope': 'Displayed scope',
       'chart.speed': 'Output speed by request',
       'chart.tokens': 'Session token composition',
       'chart.credits': 'Recorded credit use',
@@ -150,6 +132,9 @@ window.__ModuleLoader__.load({
       'chart.active': 'Active',
       'chart.inactive': 'Inactive',
       'chart.sessionCredits': 'Credits spent',
+      'chart.sessionTodayCredits': 'Credits spent today',
+      'chart.creditStatistics': 'Credit usage statistics',
+      'chart.turnCredits': 'Turn credits',
       'chart.todayCredits': 'Today',
       'summary.turn': 'This turn',
       'summary.session': 'Session total',
@@ -204,10 +189,6 @@ window.__ModuleLoader__.load({
       'seg.credits': '积分消耗',
       'prefs.promo': '模型优惠',
       'prefs.credits': 'WorkBuddy 积分',
-      'prefs.creditScope': '积分显示',
-      'prefs.creditScope.session': '本会话消耗',
-      'prefs.creditScope.today': '今日消耗（全部会话）',
-      'prefs.creditScope.balance': '剩余积分',
       'tip.promo': '促销',
       'promo.window': '适用时段',
       'promo.allDay': '全天',
@@ -252,7 +233,6 @@ window.__ModuleLoader__.load({
       'tip.ctxMessages': '对话消息',
       'tip.ctxUsed': '上下文已用',
       'tip.today': '今日消耗（全部会话）',
-      'tip.creditScope': '当前显示范围',
       'chart.speed': '每次请求的输出速度',
       'chart.tokens': '会话 token 构成',
       'chart.credits': '已记录 credits 消耗',
@@ -263,7 +243,10 @@ window.__ModuleLoader__.load({
       'chart.active': '生效中',
       'chart.inactive': '未生效',
       'chart.sessionCredits': '积分消耗',
+      'chart.creditStatistics': '积分消耗统计',
+      'chart.turnCredits': '积分用量',
       'chart.todayCredits': '今日消耗',
+      'chart.sessionTodayCredits': '今日积分消耗',
       'summary.turn': '本轮用量',
       'summary.session': 'Token 统计',
       'summary.modelTime': '模型用时',
@@ -479,11 +462,12 @@ window.__ModuleLoader__.load({
       '.tsb-rateFixed .tsb-rateFill{position:absolute;left:0;top:0}',
       '.tsb-rateExcess{position:absolute;top:0;height:100%;background:#d94841;border-radius:0 999px 999px 0}',
       '.tsb-rateCurrent.is-over{background:#d94841}',
-      '.tsb-rateFixedAxis{position:relative;height:34px;margin:0 3px;font-size:10px;line-height:14px;color:var(--dsw-alias-label-tertiary)}',
+      '.tsb-rateFixedAxis{position:relative;height:17px;margin:0 3px;font-size:10px;line-height:14px;color:var(--dsw-alias-label-tertiary)}',
       '.tsb-rateZero{position:absolute;left:0;top:0}',
       '.tsb-rateStandardLabel{position:absolute;top:0;transform:translateX(-50%);white-space:nowrap}',
       '.tsb-rateOverLabel{position:absolute;left:0;top:17px;color:#d94841;font-weight:600}',
-      '.tsb-rateValueLabel{position:absolute;top:17px;white-space:nowrap;color:var(--dsw-alias-label-primary)}',
+      '.tsb-rateHeading{display:flex;align-items:center;justify-content:space-between;gap:12px}',
+      '.tsb-rateValueLabel{white-space:nowrap;color:var(--dsw-alias-label-primary)}',
       '.tsb-rateValueLabel.is-over{color:#d94841}',
       '.tsb-rateAxis{display:grid;grid-template-columns:auto 1fr auto;align-items:baseline;gap:8px;color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:14px;margin-top:6px}',
       '.tsb-rateAxis span:nth-child(2){text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}',
@@ -1477,13 +1461,8 @@ const BILLING_ENDPOINTS = [
         if (typeof parsed !== 'object' || parsed === null) return { ...DEFAULT_PREFS };
         const out = { ...DEFAULT_PREFS };
         for (const key of Object.keys(DEFAULT_PREFS)) {
-          // Booleans are the visibility switches; `creditScope` is a string, so
-          // it is validated separately instead of being dropped by the boolean
-          // check (which would silently reset the user's choice on reload).
-          if (key === 'creditScope') continue;
           if (typeof parsed[key] === 'boolean') out[key] = parsed[key];
         }
-        if (isCreditScope(parsed.creditScope)) out.creditScope = parsed.creditScope;
         return out;
       } catch (_error) {
         return { ...DEFAULT_PREFS };
@@ -1983,11 +1962,10 @@ const BILLING_ENDPOINTS = [
         const baseline = 100;
         const current = Math.min(100, value * baseline);
         const excess = Math.max(0, value - 1);
-        const currentStyle = { left: current + '%', transform: current < 8 ? 'none' : current > 92 ? 'translateX(-100%)' : 'translateX(-50%)' };
         return h(
           'div',
           { className: 'tsb-chart', role: 'img', 'aria-label': chart.title },
-          h('div', { className: 'tsb-chartTitle' }, chart.title),
+          h('div', { className: 'tsb-chartTitle tsb-rateHeading' }, h('span', null, chart.title), h('strong', { className: 'tsb-rateValueLabel' + (excess > 0 ? ' is-over' : '') }, chart.valueLabel)),
           h('div', { className: 'tsb-rateTrack tsb-rateFixed' },
             h('span', { className: 'tsb-rateStandardZone', style: { width: baseline + '%' } }),
             h('span', { className: 'tsb-rateFill', style: { width: Math.min(value, 1) * baseline + '%' } }),
@@ -1999,7 +1977,6 @@ const BILLING_ENDPOINTS = [
             h('span', { className: 'tsb-rateZero' }, '×0'),
             h('span', { className: 'tsb-rateStandardLabel', style: { left: baseline + '%', transform: 'translateX(-100%)' } }, chart.standardLabel),
             excess > 0 ? h('span', { className: 'tsb-rateOverLabel' }, '+' + Number((excess * 100).toFixed(2)) + '%') : null,
-            h('strong', { className: 'tsb-rateValueLabel' + (excess > 0 ? ' is-over' : ''), style: currentStyle }, chart.valueLabel),
           ),
           excess > 0 ? h('div', { className: 'tsb-rateOverflowTrack' }, h('span', { className: 'tsb-rateExcess', style: { left: '0%', width: Math.min(100, excess * 100) + '%' } })) : null,
         );
@@ -2231,12 +2208,8 @@ const BILLING_ENDPOINTS = [
      * placeholder while a real figure is available.
      */
     const creditChipFor = (T2) => {
-      const scope = isCreditScope(prefs.creditScope) ? prefs.creditScope : 'session';
       const unit = T2('credit.unit');
-      const title = T2('prefs.creditScope.' + scope);
-      if (scope === 'balance') return { head: balTotal === null ? '—' : bal.unlimited === true ? '不限量' : fmtCredit(balTotal), unit, scope, title };
-      if (scope === 'today') return { head: creditToday === null ? '—' : fmtCredit(creditToday), unit, scope, title };
-      return { head: creditSession === null ? '—' : fmtCredit(creditSession), unit, scope: 'session', title };
+      return { head: sessionToday === null ? '—' : fmtCredit(sessionToday), unit, scope: 'sessionToday', title: T2('chart.sessionTodayCredits') };
     };
     // ---- session totals: prefer the durable tokenUsage projection --------
     let sessionTotal = null;
@@ -2535,6 +2508,18 @@ const BILLING_ENDPOINTS = [
      * @param {Function} props.t - translator.
      * @returns {object|null}
      */
+    function CreditModelList({ rows, t }) {
+      return h('div', { className: 'tsb-modelList' }, rows.map((row) => h('div', { className: 'tsb-modelRow', key: row.key },
+              h('span', { className: 'tsb-timingSwatch', style: { background: row.color } }),
+              h('span', { className: 'tsb-modelName' }, row.label),
+              h('span', { className: 'tsb-modelCredits' }, row.credits),
+              row.periodText || row.tokens ? h('span', { className: 'tsb-modelTokens' }, row.periodText || row.tokens) : null,
+              row.unitPrice === null || row.unitPrice === undefined
+                ? null
+                : h('span', { className: 'tsb-modelRate' }, row.unitPrice + ' ' + (row.unitPriceUnit || t('unit.cnyPerYiToken'))),
+            )));
+    }
+
     function CardBody(props) {
       const groups = Array.isArray(props.groups) ? props.groups.filter((g) => g !== null && typeof g === 'object') : [];
       if (groups.length === 0) return null;
@@ -2581,15 +2566,7 @@ const BILLING_ENDPOINTS = [
         // No divider here: the chart class already ends with its own border-bottom, so adding one
         // produced two rules a few pixels apart. That border is the separator.
         Array.isArray(group.modelRows) && group.modelRows.length > 0
-          ? h('div', { className: 'tsb-modelList' }, group.modelRows.map((row) => h('div', { className: 'tsb-modelRow', key: row.key },
-              h('span', { className: 'tsb-timingSwatch', style: { background: row.color } }),
-              h('span', { className: 'tsb-modelName' }, row.label),
-              h('span', { className: 'tsb-modelCredits' }, row.credits),
-              h('span', { className: 'tsb-modelTokens' }, row.periodText || row.tokens),
-              row.unitPrice === null || row.unitPrice === undefined
-                ? null
-                : h('span', { className: 'tsb-modelRate' }, row.unitPrice + ' ' + (row.unitPriceUnit || t('unit.cnyPerYiToken'))),
-            )))
+          ? h(CreditModelList, { rows: group.modelRows, t })
           : null,
         // Only when no chart preceded it: a chart plus rows must not produce two rules.
         !group.chart && Array.isArray(group.rows) && group.rows.length > 0
@@ -2698,7 +2675,7 @@ const BILLING_ENDPOINTS = [
     }
 
     function PrefsPanel(props) {
-      const { prefs, onToggle, onCreditScope, t, anchorRef, onClose } = props;
+      const { prefs, onToggle, t, anchorRef, onClose } = props;
       const panelRef = React.useRef(null);
       const [pos, setPos] = React.useState(null);
 
@@ -2754,29 +2731,6 @@ const BILLING_ENDPOINTS = [
             h('span', null, t(labelKey)),
           ),
         ),
-        // Scope selector for the ◈ chip. Radio inputs rather than a <select>:
-        // three mutually exclusive choices read better as a group, and the
-        // panel's own sizing/overflow stays untouched.
-        prefs.credits
-          ? h(
-              'div',
-              { className: 'tsb-scope' },
-              h('div', { className: 'tsb-scopeTitle' }, t('prefs.creditScope')),
-              CREDIT_SCOPES.map((scope) =>
-                h(
-                  'label',
-                  { className: 'tsb-row tsb-radio', key: scope },
-                  h('input', {
-                    type: 'radio',
-                    name: 'tsb-credit-scope',
-                    checked: prefs.creditScope === scope,
-                    onChange: () => onCreditScope(scope),
-                  }),
-                  h('span', null, t('prefs.creditScope.' + scope)),
-                ),
-              ),
-            )
-          : null,
         h('div', { className: 'tsb-hint' }, t('prefs.hint')),
       );
     }
@@ -2842,15 +2796,6 @@ const BILLING_ENDPOINTS = [
       const toggle = React.useCallback((key) => {
         setPrefs((prev) => {
           const next = { ...prev, [key]: !prev[key] };
-          writePrefs(next);
-          return next;
-        });
-      }, []);
-      const setCreditScope = React.useCallback((scope) => {
-        if (!isCreditScope(scope)) return;
-        setPrefs((prev) => {
-          if (prev.creditScope === scope) return prev;
-          const next = { ...prev, creditScope: scope };
           writePrefs(next);
           return next;
         });
@@ -2954,6 +2899,19 @@ const BILLING_ENDPOINTS = [
         percent,
         detail: detail || '',
       });
+
+      const creditModelRow = (cost, credits, index, palette) => {
+                  const periods = [];
+                  if (modelHasPeriodPricing(cost.model) && cost.peakTokens > 0) periods.push(T('split.peak') + ' ' + fmtTokens(cost.peakTokens, locale));
+                  if (modelHasPeriodPricing(cost.model) && cost.offTokens > 0) periods.push(T('split.off') + ' ' + fmtTokens(cost.offTokens, locale));
+                  return {
+                    key: 'model-' + cost.model, label: modelLabel(cost.model), color: palette[index % palette.length],
+                    credits: credits, tokens: fmtTokens(cost.tokens, locale),
+                    unitPrice: cost.tokens > 0 ? (cost.cny / (cost.tokens / 1e8)).toFixed(2) : null,
+                    unitPriceUnit: T('unit.cnyPerYiToken'),
+                    periodText: periods.length > 0 ? periods.join(' / ') : null,
+                  };
+      };
 
       const tips = {
         speed: { head: T('summary.speed'), speed: overviewSpeed === null ? '—' : overviewSpeed + ' tok/s', timing: timingItems, overview: true },
@@ -3075,7 +3033,7 @@ const BILLING_ENDPOINTS = [
         credits: {
           // Top-level title names the scope (本会话消耗 / 今日消耗 / 剩余积分); the group heading below names
           // what the breakdown is. Repeating one string twice would waste the first line.
-          head: creditChip ? creditChip.title : T('prefs.creditScope.session'),
+          head: creditChip ? creditChip.title : T('chart.sessionCredits'),
           cached: billing.get() && billing.get().fromCache === true,
           // The conversation total sits beside the group heading, the models below are its breakdown.
           modelHead: T('chart.sessionCredits'),
@@ -3106,16 +3064,7 @@ const BILLING_ENDPOINTS = [
                 const models = billing.get()?.bySession?.[sessionId]?.coverage?.models || {};
                 return splits.map((cost, index) => {
                   const actual = models[cost.model];
-                  const periods = [];
-                  if (modelHasPeriodPricing(cost.model) && cost.peakTokens > 0) periods.push(T('split.peak') + ' ' + fmtTokens(cost.peakTokens, locale));
-                  if (modelHasPeriodPricing(cost.model) && cost.offTokens > 0) periods.push(T('split.off') + ' ' + fmtTokens(cost.offTokens, locale));
-                  return {
-                    key: 'model-' + cost.model, label: modelLabel(cost.model), color: palette[index % palette.length],
-                    credits: actual && (actual.count > 0 || actual.estimatedCount > 0) ? fmtCredit(Number.isFinite(actual.displayCredits) ? actual.displayCredits : actual.credits + (actual.estimated || 0)) : '—', tokens: fmtTokens(cost.tokens, locale),
-                    unitPrice: cost.tokens > 0 ? (cost.cny / (cost.tokens / 1e8)).toFixed(2) : null,
-                    unitPriceUnit: T('unit.cnyPerYiToken'),
-                    periodText: periods.length > 0 ? periods.join(' / ') : null,
-                  };
+                  return creditModelRow(cost, actual && (actual.count > 0 || actual.estimatedCount > 0) ? fmtCredit(Number.isFinite(actual.displayCredits) ? actual.displayCredits : actual.credits + (actual.estimated || 0)) : '—', index, palette);
                 });
               }
               const rows = splits.map((row, index) => ({
@@ -3147,6 +3096,33 @@ const BILLING_ENDPOINTS = [
         },
       };
 
+      // Reuse the same model list for session totals and the session's Beijing-day totals.
+      const sessionCreditSection = {
+        head: T('chart.creditStatistics'),
+        speed: tips.credits.modelHeadTotal,
+        modelRows: tips.credits.modelRows,
+        rows: [[T('tip.balance'), balTotal === null ? '—' : fmtCredit(balTotal), T('credit.unit'), 'balance']],
+      };
+      const todayModels = billing.get()?.bySession?.[sessionId]?.coverage?.todayModels || {};
+      const todayPalette = [TOKEN_COLORS.cacheWrite, TOKEN_COLORS.output, TOKEN_COLORS.input, TOKEN_COLORS.cost];
+      tips.credits = {
+        head: T('chart.sessionTodayCredits'),
+        modelHead: T('chart.sessionTodayCredits'),
+        speed: sessionToday === null ? '—' : fmtCredit(sessionToday),
+        modelHeadTotal: sessionToday === null ? '—' : fmtCredit(sessionToday),
+        cached: billing.get()?.fromCache === true,
+        modelRows: Object.entries(todayModels).map(([model, row], index) => creditModelRow({...row, model}, fmtCredit(row.credits), index, todayPalette)),
+        rows: [],
+      };
+
+      const turnCredits = latest ? billing.get()?.bySession?.[sessionId]?.coverage?.turns?.[latest.turn] : null;
+      const turnCreditSection = {
+        head: T('chart.turnCredits'),
+        speed: turnCredits ? fmtCredit(turnCredits.total) : '—',
+        modelRows: Object.entries(turnCredits?.models || {}).map(([model, row], index) => creditModelRow({...row, model}, fmtCredit(row.credits), index, todayPalette)),
+        rows: [],
+      };
+
       // Assemble the combined card. Sections follow the order the chips appear in the bar.
       const sectionOf = (tip) => ({
         head: tip.head,
@@ -3161,6 +3137,7 @@ const BILLING_ENDPOINTS = [
       // Two sections: the turn's token breakdown, then a credit panel titled with the model actually in
       // use so the figures are unambiguous when several models are configured.
       const turnSection = sectionOf(tips.turn);
+      tips.session.sections = [sectionOf(tips.session), sessionCreditSection];
       // Titled for what the figures are, not for whichever model happens to be selected: a conversation
       // can switch models mid-way, so its spend is not one model's.
       const creditHeading = T('chart.sessionCredits');
@@ -3168,7 +3145,8 @@ const BILLING_ENDPOINTS = [
       combinedTip = {
         head: T('summary.combined'),
         sections: [
-          { ...turnSection }
+          { ...turnSection },
+          turnCreditSection
         ],
       };
       // Reachable through the same lookup the other cards use.
@@ -3393,7 +3371,7 @@ const BILLING_ENDPOINTS = [
             ? h(HoverCard, { tip: tips[hover], t, anchorRef: hoveredAnchorRef })
             : null,
         ),
-        open ? h(PrefsPanel, { prefs, onToggle: toggle, onCreditScope: setCreditScope, t, anchorRef: gearRef, onClose: closePanel }) : null,
+        open ? h(PrefsPanel, { prefs, onToggle: toggle, t, anchorRef: gearRef, onClose: closePanel }) : null,
       );
     }
 

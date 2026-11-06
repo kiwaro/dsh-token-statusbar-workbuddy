@@ -7,3 +7,6 @@ coverage/
 *.jsonl
 .env
 .env.*
+
+# LCL 项目内检查记录
+.lcl/work/
