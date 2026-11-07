@@ -42,5 +42,3 @@
 
 1. 日志文件为 account-reconciliation.jsonl、account-reconciliation.jsonl.1 和 account-reconciliation.jsonl.2。轮转时替换最早的历史文件；当前余额快照采用临时文件加重命名方式保存。
 2. 旧版本核对快照在首次采样时按时间窗口衔接，随后采样按每个账号的累计实际积分差额核对，覆盖跨窗口修订、退款和账号归属修订。
-
-Trae 与 WorkBuddy 共用上述费用计算、已登记积分换算和汇总算法。供应商只决定积分记录渠道、余额来源及响应标识空间；模型计算使用原有模型标识。实际记录按供应商与响应编号替换估算。

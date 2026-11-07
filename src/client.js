@@ -125,7 +125,7 @@ window.__ModuleLoader__.load({
       'chart.speed': 'Output speed by request',
       'chart.tokens': 'Session token composition',
       'chart.credits': 'Recorded credit use',
-      'chart.rate': 'Billing multiplier',
+      'chart.rate': 'WorkBuddy rate multiplier',
       'chart.promo': 'Promotion status',
       'chart.standard': 'Standard ×1',
       'chart.current': 'Current',
@@ -133,8 +133,6 @@ window.__ModuleLoader__.load({
       'chart.inactive': 'Inactive',
       'chart.sessionCredits': 'Credits spent',
       'chart.sessionTodayCredits': 'Credits spent today',
-      'credit.pending': '—',
-      'credit.pendingDetail': 'Trae provides account balances; response credit details are unavailable',
       'chart.creditStatistics': 'Credit usage statistics',
       'chart.turnCredits': 'Turn credits',
       'chart.todayCredits': 'Today',
@@ -190,7 +188,7 @@ window.__ModuleLoader__.load({
       'seg.promo': '促销',
       'seg.credits': '积分消耗',
       'prefs.promo': '模型优惠',
-      'prefs.credits': '积分',
+      'prefs.credits': 'WorkBuddy 积分',
       'tip.promo': '促销',
       'promo.window': '适用时段',
       'promo.allDay': '全天',
@@ -238,7 +236,7 @@ window.__ModuleLoader__.load({
       'chart.speed': '每次请求的输出速度',
       'chart.tokens': '会话 token 构成',
       'chart.credits': '已记录 credits 消耗',
-      'chart.rate': '计费倍率',
+      'chart.rate': 'WorkBuddy 计费倍率',
       'chart.promo': '促销状态',
       'chart.standard': '标准 ×1',
       'chart.current': '当前',
@@ -249,8 +247,6 @@ window.__ModuleLoader__.load({
       'chart.turnCredits': '积分用量',
       'chart.todayCredits': '今日消耗',
       'chart.sessionTodayCredits': '今日积分消耗',
-      'credit.pending': '—',
-      'credit.pendingDetail': 'Trae 当前提供账号余额，逐响应积分明细暂缺',
       'summary.turn': '本轮用量',
       'summary.session': 'Token 统计',
       'summary.modelTime': '模型用时',
@@ -1098,7 +1094,6 @@ function fmtCredit(value) {
     /** Account-wide facts shared by every consumer. */
     let BILLING = { models: {}, balance: null, credits: { today: 0, session: 0 } };
     let BILLING_MODEL;
-    let BILLING_PROVIDER;
     /**
      * Per-session credit totals, keyed by session id, each entry shaped like
      * `{ session, sessionCount, today, todayCount, at }`.
@@ -1192,9 +1187,7 @@ const BILLING_ENDPOINTS = [
       }
       billingInflight = true;
       try {
-        const requestedProvider = BILLING_PROVIDER;
         const params = [];
-        if (BILLING_PROVIDER) params.push('provider=' + encodeURIComponent(BILLING_PROVIDER));
         if (BILLING_MODEL) params.push('model=' + encodeURIComponent(BILLING_MODEL));
         // The session list is what makes the per-conversation figures correct on
         // an unmounted-but-still-open conversation: every tracked session is
@@ -1220,7 +1213,6 @@ const BILLING_ENDPOINTS = [
           return;
         }
         const next = await res.json();
-        if (requestedProvider !== BILLING_PROVIDER) { rerequest = true; return; }
         if (next === null || typeof next !== 'object') {
           BILLING_FAILURES += 1;
           BILLING_LAST_ERROR = 'response was not a JSON object';
@@ -1249,7 +1241,6 @@ const BILLING_ENDPOINTS = [
         BILLING = {
           reconciliation: next.reconciliation,
           creditMode: next.creditMode,
-          provider: next.provider,
           bySession: Object.fromEntries(CREDITS_BY_SESSION),
           models: next.models && typeof next.models === 'object' ? next.models : {},
           balance: next.balance && typeof next.balance === 'object' ? next.balance : null,
@@ -1285,13 +1276,9 @@ const BILLING_ENDPOINTS = [
     }
 
     /** Point the Host at the selected model (kept for symmetry with the picker). */
-    function noteSelectedModel(modelId, providerId) {
+    function noteSelectedModel(modelId) {
       if (typeof modelId !== 'string' || modelId === '') return;
-      if (BILLING_MODEL === modelId && BILLING_PROVIDER === providerId) return;
-      BILLING_PROVIDER = providerId;
-      BILLING = { models: {}, balance: null, credits: {} };
-      CREDITS_BY_SESSION.clear();
-      notifyBillingWatchers();
+      if (BILLING_MODEL === modelId) return;
       BILLING_MODEL = modelId;
       void refreshBilling();
     }
@@ -2164,7 +2151,7 @@ const BILLING_ENDPOINTS = [
     const facts = billingFor(billingSnap, selProvider, selModel);
     const promoBadge = badgeOf(facts);
     const promoRate = rateLabel(facts);
-    const promoStatus = [promoBadge, promoRate].filter(Boolean).join(' · ') || null;
+    const promoStatus = promoBadge || promoRate;
     const promoRateValue = facts && Number.isFinite(facts.rate)
       ? Math.max(0, facts.rate)
       : facts && facts.free === true ? 0 : null;
@@ -2199,8 +2186,7 @@ const BILLING_ENDPOINTS = [
       const cny = rows.reduce((sum, row) => sum + (Number(row.cny) || 0), 0);
       return cny > 0 ? cny * ratio : ledger;
     })();
-    const creditPendingToday = Object.values(billingSnap.bySession?.[sessionId]?.coverage?.todayModels || {}).some(row => row.unresolved);
-    const hasCredits = creditPendingToday || (creditToday !== null && creditToday > 0) || (creditSession !== null && creditSession > 0);
+    const hasCredits = (creditToday !== null && creditToday > 0) || (creditSession !== null && creditSession > 0);
     // Account credit balance from the bridge (a single account, not per-provider).
     const bal = billingSnap.balance && typeof billingSnap.balance === 'object' ? billingSnap.balance : null;
     const balTotal = bal !== null && Number.isFinite(bal.total) ? bal.total : null;
@@ -2223,7 +2209,7 @@ const BILLING_ENDPOINTS = [
      */
     const creditChipFor = (T2) => {
       const unit = T2('credit.unit');
-      return { head: creditPendingToday ? T2('credit.pending') : sessionToday === null ? '—' : fmtCredit(sessionToday), unit, scope: 'sessionToday', title: T2('chart.sessionTodayCredits') };
+      return { head: sessionToday === null ? '—' : fmtCredit(sessionToday), unit, scope: 'sessionToday', title: T2('chart.sessionTodayCredits') };
     };
     // ---- session totals: prefer the durable tokenUsage projection --------
     let sessionTotal = null;
@@ -2792,8 +2778,8 @@ const BILLING_ENDPOINTS = [
       // which conversation this is (to scope "this session" credits).
       const selModelId = selectionOf(modelSelection).model;
       React.useEffect(() => {
-        billing.noteSelectedModel(selModelId, selectionOf(modelSelection).provider);
-      }, [selModelId, selectionOf(modelSelection).provider, billing]);
+        billing.noteSelectedModel(selModelId);
+      }, [selModelId, billing]);
       React.useEffect(() => {
         billing.noteSession(sessionId);
       }, [sessionId, billing]);
@@ -3027,7 +3013,7 @@ const BILLING_ENDPOINTS = [
           modelLine: [modelTitle, prefs.promo ? promoRate : null, prefs.promo ? promoBadge : null].filter(Boolean).join(' · ') || null,
         },
         promo: {
-          head: ({ trae: 'Trae', 'trae-enterprise': 'Trae Enterprise', 'trae-global': 'Trae Global', workbuddy: 'WorkBuddy' }[selProvider] || '') + ' ' + T('chart.rate'),
+          head: T('tip.promo'),
           // The promotion's own name, shown beside the heading instead of repeating it as a row.
           speed: promoBadge || null,
           chart: promoRateValue === null
@@ -3042,7 +3028,6 @@ const BILLING_ENDPOINTS = [
           rows: [
             [T('tip.model'), modelTitle || null],
             [T('promo.window'), promoWindowText(facts, promoBadge, T)],
-            ...(Array.isArray(facts?.promoDetails) ? facts.promoDetails.map(detail => [T('chart.promo'), detail]) : []),
           ].filter((row) => row[1] !== null),
         },
         credits: {
@@ -3077,8 +3062,10 @@ const BILLING_ENDPOINTS = [
               const totalCredits = ratio === null ? null : totalCny * ratio;
               if (billing.get()?.creditMode === 'exact-v2') {
                 const models = billing.get()?.bySession?.[sessionId]?.coverage?.models || {};
-                return Object.entries(models).map(([model, actual], index) => creditModelRow(
-                  { ...actual, model }, actual.unresolved ? T('credit.pending') : fmtCredit(actual.displayCredits), index, palette));
+                return splits.map((cost, index) => {
+                  const actual = models[cost.model];
+                  return creditModelRow(cost, actual && (actual.count > 0 || actual.estimatedCount > 0) ? fmtCredit(Number.isFinite(actual.displayCredits) ? actual.displayCredits : actual.credits + (actual.estimated || 0)) : '—', index, palette);
+                });
               }
               const rows = splits.map((row, index) => ({
                 key: 'model-' + index,
@@ -3112,7 +3099,7 @@ const BILLING_ENDPOINTS = [
       // Reuse the same model list for session totals and the session's Beijing-day totals.
       const sessionCreditSection = {
         head: T('chart.creditStatistics'),
-        speed: billing.get()?.bySession?.[sessionId]?.coverage?.unresolved ? T('credit.pending') : tips.credits.modelHeadTotal,
+        speed: tips.credits.modelHeadTotal,
         modelRows: tips.credits.modelRows,
         rows: [[T('tip.balance'), balTotal === null ? '—' : fmtCredit(balTotal), T('credit.unit'), 'balance']],
       };
@@ -3121,19 +3108,18 @@ const BILLING_ENDPOINTS = [
       tips.credits = {
         head: T('chart.sessionTodayCredits'),
         modelHead: T('chart.sessionTodayCredits'),
-        speed: Object.values(todayModels).some(row => row.unresolved) ? T('credit.pending') : sessionToday === null ? '—' : fmtCredit(sessionToday),
-        modelHeadTotal: Object.values(todayModels).some(row => row.unresolved) ? T('credit.pending') : sessionToday === null ? '—' : fmtCredit(sessionToday),
+        speed: sessionToday === null ? '—' : fmtCredit(sessionToday),
+        modelHeadTotal: sessionToday === null ? '—' : fmtCredit(sessionToday),
         cached: billing.get()?.fromCache === true,
-        modelRows: Object.entries(todayModels).map(([model, row], index) => creditModelRow({...row, model}, row.unresolved ? (T('credit.pending')) : fmtCredit(row.credits), index, todayPalette)),
+        modelRows: Object.entries(todayModels).map(([model, row], index) => creditModelRow({...row, model}, fmtCredit(row.credits), index, todayPalette)),
         rows: [],
-        foot: Object.values(todayModels).some(row => row.unresolved) ? T('credit.pendingDetail') : undefined,
       };
 
       const turnCredits = latest ? billing.get()?.bySession?.[sessionId]?.coverage?.turns?.[latest.turn] : null;
       const turnCreditSection = {
         head: T('chart.turnCredits'),
-        speed: Object.values(turnCredits?.models || {}).some(row => row.unresolved) ? T('credit.pending') : turnCredits ? fmtCredit(turnCredits.total) : '—',
-        modelRows: Object.entries(turnCredits?.models || {}).map(([model, row], index) => creditModelRow({...row, model}, row.unresolved ? (T('credit.pending')) : fmtCredit(row.credits), index, todayPalette)),
+        speed: turnCredits ? fmtCredit(turnCredits.total) : '—',
+        modelRows: Object.entries(turnCredits?.models || {}).map(([model, row], index) => creditModelRow({...row, model}, fmtCredit(row.credits), index, todayPalette)),
         rows: [],
       };
 

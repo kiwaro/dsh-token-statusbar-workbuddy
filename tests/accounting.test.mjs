@@ -65,38 +65,3 @@ test('turn credits deduplicate responses and replace estimates within each turn'
  records.set('b',{r:'b',c:4,t:101});
  assert.equal(summarizeSession(text,records,null,quote).turns[2].total,6);
 });
-
-
-test('Trae regions survive switching, share no response keys and retain four token buckets', () => {
-  const make=(provider,id='same',turn=2,step=1)=>JSON.stringify({type:'assistant/message',time:100,data:{turn,step,usage:{inputTokens:10,cacheReadTokens:20,cacheWriteTokens:30,outputTokens:40},message:{source:{provider,model:'deepseek-v4.1-flash',replayState:{response:{provider,model:'deepseek-v4.1-flash',...(id ? {responseId:id} : {})}}}}}});
-  const records=parseJournal(JSON.stringify({r:'same',c:7,t:100,a:'workbuddy-account'}));
-  const text=[make('workbuddy'),make('trae'),make('trae'),make('trae-enterprise'),make('trae-global',null)].join('\n');
-  const result=summarizeSession(text,records,null,quote,200);
-  assert.equal(result.expected,4); assert.equal(result.matched,1); assert.equal(result.actual,7);
-  assert.equal(result.estimated,0); assert.equal(result.unresolved,3);
-  for(const provider of ['trae','trae-enterprise','trae-global']) {
-    const key=provider+'/deepseek-v4.1-flash';
-    assert.equal(result.models[key].tokens,100);
-    assert.equal(result.todayModels[key].unresolved,1);
-    assert.equal(result.turns[2].models[key].tokens,100);
-  }
-  records.set('trae/same',{r:'trae/same',c:2,t:110,a:'trae-account'});
-  const corrected=summarizeSession(text,records,null,quote,200);
-  assert.equal(corrected.actual,9); assert.equal(corrected.unresolved,2);
-  assert.equal(corrected.todayModels['trae/deepseek-v4.1-flash'].credits,2);
-  assert.equal(summarizeSession(text,records,150,quote,200).expected,0);
-});
-
-
-test('all channels reuse the existing model calculation and actual replacement',()=>{
- const usage={inputTokens:1000,cacheReadTokens:500,cacheWriteTokens:0,outputTokens:20};
- for(const provider of ['workbuddy','trae','trae-enterprise','trae-global']) {
-   const e=JSON.parse(event('shared','deepseek-v4.1-flash',100,usage));e.data.turn=1;e.data.message.source.replayState.response.provider=provider;
-   const text=JSON.stringify(e);const first=summarizeSession(text,new Map(),null,quote,200);
-   assert.equal(first.displayTotal,1);assert.equal(first.todayTotal,1);assert.equal(first.turns[1].total,1);
-   assert.equal(first.unresolved,0);
-   const key=provider==='workbuddy'?'shared':provider+'/shared';
-   const second=summarizeSession(text,new Map([[key,{r:key,c:2,t:110,a:'rotated'}]]),null,quote,200);
-   assert.equal(second.displayTotal,2);assert.equal(second.estimated,0);assert.equal(second.turns[1].total,2);
- }
-});
