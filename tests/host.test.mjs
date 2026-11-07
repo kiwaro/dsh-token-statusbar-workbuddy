@@ -134,3 +134,79 @@ test('calendar configuration validates dates and refreshes after its cache lifet
   assert.ok(messages.some(value=>value.includes('ECALENDAR')));
  } finally {Date.now=clock;console.warn=warn; if(previousHome===undefined) delete process.env.DSH_HOME;else process.env.DSH_HOME=previousHome;}
 });
+
+
+test('Trae provider routes isolate region balances, rates and cache entries', async () => {
+ const {buildBilling,__test}=await import('../lib/index.js');
+ const routes=[];
+ const server=http.createServer((req,res)=>{
+   routes.push(req.url);res.setHeader('content-type','application/json');
+   const panel=new URL(req.url,'http://local').searchParams.get('region');
+   res.end(JSON.stringify({status:'signed-in',credits:panel==='cn'?{total:999,generalAvailable:12}:undefined,models:[{id:'deepseek-v4.1-flash',creditMultiplier:0.5}]}));
+ });
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ try {
+   const base='http://127.0.0.1:'+server.address().port;
+   for(const [provider,panel] of [['trae','cn'],['trae-enterprise','enterprise'],['trae-global','ai']]) {
+     const result=await buildBilling(base,{provider,fresh:'1'});
+     assert.equal(routes.at(-1),'/plugins/dsh-connect-trae/usage?region='+panel);
+     assert.equal(result.provider,provider);
+     assert.equal(result.balance?.total,panel==='cn'?12:undefined);
+     assert.equal(result.models['deepseek-v4.1-flash'].rate,panel==='cn'?0.5:undefined);
+   }
+   assert.notEqual(__test.payloadKey({provider:'trae'},1),__test.payloadKey({provider:'workbuddy'},1));
+ } finally {await new Promise(resolve=>server.close(resolve));}
+});
+
+
+test('sampling transcript reader includes assistant events after the identity zstd frame', async()=>{
+ const {__test}=await import('../lib/index.js');
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'trae-frames-'));
+ const file=path.join(root,'session.v4.jsonl.zstd');
+ const first=JSON.stringify({type:'session',createdAt:1})+'\n';
+ const second=JSON.stringify({type:'assistant/message',time:2,data:{usage:{inputTokens:100},message:{source:{provider:'trae'}}}})+'\n';
+ fs.writeFileSync(file,Buffer.concat([zlib.zstdCompressSync(Buffer.from(first)),zlib.zstdCompressSync(Buffer.from(second))]));
+ const events=__test.readTranscript(file).split('\n').filter(Boolean).map(JSON.parse);
+ assert.equal(events.length,2);assert.equal(events[1].data.usage.inputTokens,100);
+});
+
+
+test('Trae channel journal replaces shared estimates without crossing WorkBuddy ids',async()=>{
+ const {buildBilling}=await import('../lib/index.js');
+ const store=path.join(process.env.DSH_HOME,'storages','dsh-connect-trae');fs.mkdirSync(store,{recursive:true});
+ const at=Date.now()-1000;fs.writeFileSync(path.join(store,'response-credits.jsonl'),JSON.stringify({r:'same',c:4,t:at,a:'trae-account'})+'\n');
+ const dir=path.join(process.env.DSH_HOME,'sessions','workspace','session-trae');fs.mkdirSync(dir,{recursive:true});
+ const e={type:'assistant/message',time:at,data:{turn:1,step:1,usage:{inputTokens:100,cacheReadTokens:10,cacheWriteTokens:0,outputTokens:1},message:{source:{replayState:{response:{provider:'trae',model:'deepseek-v4.1-flash',responseId:'same'}}}}}};
+ fs.writeFileSync(path.join(dir,'session.v4.jsonl.zstd'),zlib.zstdCompressSync(Buffer.from(JSON.stringify(e)+'\n')));
+ const server=http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({status:'signed-in',models:[],credits:{generalAvailable:20}}));});
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));try{
+ const result=await buildBilling('http://127.0.0.1:'+server.address().port,{provider:'trae',sessionId:'session-trae',fresh:'1'});
+ assert.equal(result.credits.session,4);assert.equal(result.credits.coverage.estimated,0);assert.equal(result.credits.coverage.turns[1].total,4);
+ }finally{await new Promise(r=>server.close(r));}
+});
+
+
+test('Trae multiplier follows the declared weekend discount window',async()=>{
+ const {__test}=await import('../lib/index.js');
+ const model={creditMultiplier:.12,activityDiscount:{current:{rate:.12,discountType:'none'},offPeak:{rate:.06,timeZone:'Asia/Shanghai',windows:[{weekdays:[6,7],startMinute:0,endMinute:1440}]}}};
+ assert.equal(__test.traeModelRate(model,Date.UTC(2026,10,7,5)),.06);
+ assert.equal(__test.traeModelRate(model,Date.UTC(2026,10,6,5)),.12);
+ assert.equal(__test.traeModelRate({creditMultiplier:0},Date.now()),0);
+});
+
+test('Trae promotion facts retain subsidy, conditional membership and off-peak hours',async()=>{
+ const {__test}=await import('../lib/index.js');
+ const model={creditMultiplier:.12,activityDiscount:{current:{beforeRate:.12,rate:.12,discountType:'none'},member:{beforeRate:.12,rate:.09,discountPercent:75},offPeak:{beforeRate:.12,rate:.06,discountPercent:50,timeZone:'Asia/Shanghai',windows:[{weekdays:[6,7],startMinute:0,endMinute:1440}]}}};
+ const live=__test.traeModelFacts(model,Date.UTC(2026,10,7,5));
+ assert.equal(live.rate,.06);
+ assert.deepEqual(live.badges,['闲时 5 折']);
+ assert.match(live.promoDetails.join(' '),/周六、周日/);
+ assert.match(live.promoDetails.join(' '),/0.09.*会员/);
+ const inactive=__test.traeModelFacts(model,Date.UTC(2026,10,6,5));
+ assert.deepEqual(inactive.badges,[]);
+ assert.match(inactive.promoDetails.join(' '),/闲时 5 折/);
+ const subsidy=__test.traeModelFacts({creditMultiplier:.06,activityDiscount:{current:{beforeRate:.12,rate:.06,discountPercent:50,discountType:'subsidy'}}},Date.now());
+ assert.deepEqual(subsidy.badges,['专属补贴 5 折']);
+ assert.match(subsidy.promoDetails.join(' '),/0.12.*0.06/);
+ assert.deepEqual(__test.traeModelFacts({creditMultiplier:.8},Date.now()).promoDetails,[]);
+});

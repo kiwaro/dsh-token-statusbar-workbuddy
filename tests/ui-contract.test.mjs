@@ -29,6 +29,8 @@ test('model-row periods follow each model price structure',()=>{
   const start=source.indexOf('      const creditModelRow ='),end=source.indexOf('      const tips =',start);
   Object.assign(ctx,{T:k=>k,fmtTokens:String,fmtCredit:n=>n.toFixed(2),modelLabel:x=>x,palette:['blue'],locale:'zh'});
   vm.runInContext(source.slice(start,end)+'\nbuild=(splits)=>splits.map((cost,index)=>creditModelRow(cost,"1.00",index,palette));',ctx);
+  const trae=ctx.build([{model:'trae/deepseek-v4.1-flash',tokens:100,offTokens:100,cny:1}])[0];
+  assert.equal(trae.unitPrice,'1000000.00'); assert(trae.periodText.includes('split.off')); assert.equal(trae.tokens,'100');
   const rows=ctx.build([{model:'glm-5.3-flash',tokens:100,offTokens:100,cny:1},{model:'deepseek-v4.1-flash',tokens:100,offTokens:100,cny:1}],{});
   assert.equal(rows[0].periodText,null);
   assert.equal(rows[0].tokens,'100');
@@ -66,7 +68,7 @@ test('credit cards separate session today from session totals and reuse model li
 test('credit chip follows session today and scope selector is removed',()=>{
  const a=source.indexOf('    const creditChipFor = (T2) => {'),b=source.indexOf('    // ---- session totals:',a);
  for(const [today,want] of [[0,'0.00'],[100,'100.00'],[null,'—']]) {
-  const ctx=vm.createContext({sessionToday:today,balTotal:553.85,bal:{},fmtCredit:n=>n.toFixed(2)});
+  const ctx=vm.createContext({creditPendingToday:false,sessionToday:today,balTotal:553.85,bal:{},fmtCredit:n=>n.toFixed(2)});
   vm.runInContext(source.slice(a,b)+'\nresult=creditChipFor(x=>x);',ctx);
   assert.equal(ctx.result.head,want);assert.equal(ctx.result.scope,'sessionToday');
  }
@@ -83,3 +85,16 @@ test('renamed preferences read old values, prioritize new values and save under 
  values.delete('new');values.set('old','invalid');assert.equal(context.readPrefs().creditScope,undefined);
  context.writePrefs({speed:false,creditScope:'today'});assert.equal(writes[0][0],'new');assert.equal(values.get('old'),'invalid');
 });
+
+
+test('Trae pending usage remains visible in the credit chip and shared rows',()=>{
+ const a=source.indexOf('    const creditChipFor = (T2) => {'),b=source.indexOf('    // ---- session totals:',a);
+ const ctx=vm.createContext({creditPendingToday:true,sessionToday:0,fmtCredit:n=>n.toFixed(2)});
+ vm.runInContext(source.slice(a,b)+'\nresult=creditChipFor(x=>x);',ctx);
+ assert.equal(ctx.result.head,'credit.pending');
+ assert(source.includes("params.push('provider=' + encodeURIComponent(BILLING_PROVIDER))"));
+ assert(source.includes('if (requestedProvider !== BILLING_PROVIDER)'));
+ assert(source.includes("actual.unresolved ? T('credit.pending')"));
+});
+
+test('Trae missing credit copy describes data availability',()=>{ assert(!source.includes('待核实')); assert(source.includes('逐响应积分明细暂缺')); });
