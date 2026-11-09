@@ -134,3 +134,48 @@ test('calendar configuration validates dates and refreshes after its cache lifet
   assert.ok(messages.some(value=>value.includes('ECALENDAR')));
  } finally {Date.now=clock;console.warn=warn; if(previousHome===undefined) delete process.env.DSH_HOME;else process.env.DSH_HOME=previousHome;}
 });
+
+
+test('Trae promotion restores the original badge and explanation rows',async()=>{
+ const {__test}=await import('../lib/index.js');
+ const activityDiscount={member:{beforeRate:.12,rate:.09,discountPercent:75},offPeak:{beforeRate:.12,rate:.06,discountPercent:50,timeZone:'Asia/Shanghai',windows:[{weekdays:[6,7],startMinute:0,endMinute:1440}]}};
+ const facts=__test.traeModelFacts({creditMultiplier:.12,activityDiscount},Date.UTC(2026,10,7,5));
+ assert.deepEqual(facts.badges,['闲时 5 折']);
+ assert.equal(facts.promoDetails.length,2);
+ assert(facts.promoDetails[0].startsWith('闲时 5 折：×0.12 → ×0.06。周末 全天'));
+ assert(facts.promoDetails[1].startsWith('会员价 7.5 折：'));
+});
+
+test('Trae weekday windows share one weekday label',async()=>{
+ const {__test}=await import('../lib/index.js');
+ const model={creditMultiplier:.12,activityDiscount:{offPeak:{beforeRate:.12,rate:.06,discountPercent:50,timeZone:'Asia/Shanghai',windows:[{weekdays:[1,2,3,4,5],startMinute:0,endMinute:540},{weekdays:[1,2,3,4,5],startMinute:720,endMinute:840},{weekdays:[1,2,3,4,5],startMinute:1080,endMinute:1440},{weekdays:[6,7],startMinute:0,endMinute:1440}]}}};
+ const detail=__test.traeModelFacts(model,Date.UTC(2026,10,7,5)).promoDetails[0];
+ assert.equal(detail,'闲时 5 折：×0.12 → ×0.06。周一至周五 00:00–09:00、12:00–14:00、18:00–24:00；周末 全天（北京时间）');
+});
+
+
+test('Trae token counters cannot establish its monetary billing price', async () => {
+  const {__test}=await import('../lib/index.js');
+  const u={inputTokens:500000,cacheReadTokens:0,cacheWriteTokens:0,outputTokens:100};
+  for(const provider of ['trae','trae-enterprise','trae-global']) {
+    assert.equal(__test.quoteUsage(provider+'/deepseek-v4.1-flash',u,Date.UTC(2026,10,8,5)),null);
+  }
+  assert(__test.quoteUsage('workbuddy/deepseek-v4.1-flash',u,Date.UTC(2026,10,8,5))>0);
+});
+
+
+test('same model across providers keeps separate prices and all four token buckets',async()=>{
+ const {__test}=await import('../lib/index.js');
+ const id='session-mixed-synthetic';
+ const directory=path.join(process.env.DSH_HOME,'sessions','workspace',id);
+ fs.mkdirSync(directory,{recursive:true});
+ const events=['workbuddy','trae'].map(provider=>({type:'assistant/message',time:Date.now()-1000,data:{usage:{inputTokens:1000,cacheReadTokens:2000,cacheWriteTokens:3000,outputTokens:4000},message:{source:{model:'deepseek-v4.1-flash',replayState:{response:{provider,model:'deepseek-v4.1-flash'}}}}}}));
+ fs.writeFileSync(path.join(directory,'session.v4.jsonl.zstd'),zlib.zstdCompressSync(Buffer.from(events.map(JSON.stringify).join('\n')+'\n')));
+ const split=__test.splitSessionByPeriod(id);
+ assert.equal(split.models.length,2);
+ assert.equal(split.models.reduce((sum,row)=>sum+row.tokens,0),20000);
+ const known=split.models.find(row=>row.model==='deepseek-v4.1-flash');
+ const unknown=split.models.find(row=>row.model==='trae/deepseek-v4.1-flash');
+ assert(known.cny>0);assert.equal(unknown.cny,null);assert.equal(unknown.unpricedCount,1);
+ assert.equal(known.tokens,10000);assert.equal(unknown.tokens,10000);
+});

@@ -11,3 +11,7 @@ Displays conversation usage, WorkBuddy credits, model rates and account balance 
 Credits are associated with conversations by response ID across account rotation. Actual records replace estimates. The current conversation's daily total uses midnight in Beijing time. Account balance has a separate scope.
 
 Run npm run check to build and test. See the Chinese [accounting](docs/ACCOUNTING.md), [migration](docs/MIGRATION.md) and [development](docs/DEVELOPMENT.md) guides for implementation details and limitations.
+
+## Trae pricing limits
+
+Trae token usage and actual credits remain available independently. Without verifiable cache billing details and a CNY conversion, model rows show “CNY price unavailable” instead of public API list prices. Mixed-provider totals are labeled “Estimated cost (priced channels only)”; Trae-only sessions omit the CNY estimate.

@@ -35,8 +35,9 @@ const PERIOD_PRICES = {
   'mimo-v2.6-pro': { off: { input: 3, cacheHit: 0.025, cacheWrite: 0.025, output: 6 }, peak: { input: 3, cacheHit: 0.025, cacheWrite: 0.025, output: 6 } },
 };
 
-/** The rate book for a model, falling back to the flash rate when the model is unpriced. */
+/** Reference rate book. Trae token counters do not establish cache billing or a CNY conversion. */
 export function priceBook(modelId) {
+  if (typeof modelId === 'string' && /^trae(?:-enterprise|-global)?\//.test(modelId)) return null;
   const direct = PERIOD_PRICES[modelId];
   if (direct !== undefined) return direct;
   // Strip a provider prefix such as "workbuddy/" before giving up.

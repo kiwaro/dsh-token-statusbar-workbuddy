@@ -44,7 +44,7 @@ const LEDGER_VERSION = 1;
  * user's own conversation is undetectable, while a slow number is merely slow.
  */
 /** Cache format version. Bumped when the key or payload shape changes, so old entries are discarded. */
-const CACHE_VERSION = 5;
+const CACHE_VERSION = 15;
 
 /** How long a cached payload stays usable. Credits accrue continuously, so this bounds how stale a
  *  figure can be, not just whether its pricing period still matches. */
@@ -109,7 +109,7 @@ function payloadKey(request, nowMs) {
   // The account belongs in the key too: the balance and model list are per account, so after a switch the
   // previous account's entry would otherwise stay readable for a full minute.
   const account = typeof request.account === 'string' && request.account !== '' ? request.account : '';
-  return 'accounting-v2-session-day|' + account + '|' + model + '|' + period + '|' + list.join(',') + ';calendar=' + JSON.stringify(readPricingCalendar());
+  return 'accounting-v2-session-day|' + (request.provider || 'workbuddy') + ':' + account + '|' + model + '|' + period + '|' + list.join(',') + ';calendar=' + JSON.stringify(readPricingCalendar());
 }
 
 /**
@@ -219,13 +219,25 @@ function writePayloadCache(request, payload, nowMs) {
 
 function quoteUsage(model, usage, time) {
   const book = priceBook(model);
+  if (book === null) return null;
   const rate = isPeakInstant(time) ? book.peak : book.off;
   return bucketCost({ uncached: usage.inputTokens || 0, cacheRead: usage.cacheReadTokens || 0, cacheWrite: usage.cacheWriteTokens || 0, output: usage.outputTokens || 0 }, rate);
 }
 function estimateResponseCredit(model, usage, time) { return estimateCredit(model, usage, time, quoteUsage); }
 function readResponseCredits({ strict = false } = {}) {
-  try { return parseJournal(fs.readFileSync(path.join(dshHome(), 'storages', 'dsh-connect-workbuddy', 'response-credits.jsonl'), 'utf8')); }
-  catch (error) { if(error.code !== 'ENOENT') { reportDiagnostic('response-credits-read',error); if(strict) throw error; } return new Map(); }
+  const records = new Map();
+  for (const channel of ['dsh-connect-workbuddy', 'dsh-connect-trae']) {
+    try {
+      const rows = parseJournal(fs.readFileSync(path.join(dshHome(), 'storages', channel, 'response-credits.jsonl'), 'utf8'));
+      for (const [id, row] of rows) {
+        const provider = channel === 'dsh-connect-workbuddy' ? 'workbuddy' : row.p || row.provider || 'trae';
+        if (!['workbuddy','trae','trae-enterprise','trae-global'].includes(provider)) continue;
+        const key = provider === 'workbuddy' || id.startsWith(provider + '/') ? id : provider + '/' + id;
+        records.set(key, {...row, r:key});
+      }
+    } catch (error) { if(error.code !== 'ENOENT') { reportDiagnostic('response-credits-read',error); if(strict) throw error; } }
+  }
+  return records;
 }
 function importExactCredits(ledger, sessionId, readings = readResponseCredits(), now = Date.now()) {
   const file = sessionLogPath(sessionId);
@@ -676,6 +688,70 @@ function discountInEffect(modelId, nowMs) {
   return null;
 }
 
+function traeModelRate(model, nowMs) {
+  const discount = model.activityDiscount;
+  const off = discount?.offPeak;
+  if (Number.isFinite(off?.rate)) {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {
+      timeZone: off.timeZone || 'Asia/Shanghai', weekday:'short', hour:'2-digit', minute:'2-digit', hourCycle:'h23',
+    }).formatToParts(new Date(nowMs)).map(part => [part.type, part.value]));
+    const weekday = {Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6,Sun:7}[parts.weekday];
+    const minute = Number(parts.hour) * 60 + Number(parts.minute);
+    if (off.windows?.some(window => window.weekdays?.includes(weekday) && minute >= window.startMinute && minute < window.endMinute)) return off.rate;
+  }
+  const current = discount?.current;
+  return current?.discountType && current.discountType !== 'none' && Number.isFinite(current.rate) ? current.rate : model.creditMultiplier;
+}
+
+// 保留完整活动说明，非优惠时段仍可查询规则；徽标只标记正在生效的优惠。
+function traeModelFacts(model, nowMs) {
+  const rate = traeModelRate(model, nowMs);
+  const discount = model.activityDiscount;
+  const badges = [];
+  const promoDetails = [];
+  const labelOf = (price, name) => {
+    const percent = Number.isFinite(price.discountPercent) ? price.discountPercent
+      : price.beforeRate > 0 && Number.isFinite(price.rate) ? price.rate / price.beforeRate * 100 : null;
+    return name + (percent !== null ? ' ' + Number((percent / 10).toFixed(2)) + ' 折' : '');
+  };
+  const rates = price => Number.isFinite(price.beforeRate) && Number.isFinite(price.rate)
+    ? '原倍率 ×' + price.beforeRate + '，优惠倍率 ×' + price.rate : '';
+  const current = discount?.current;
+  if (current?.discountType && current.discountType !== 'none' && Number.isFinite(current.rate)
+      && (!Number.isFinite(current.beforeRate) || current.rate < current.beforeRate)) {
+    const name = /off/.test(current.discountType) ? '闲时' : /limited/.test(current.discountType) ? '限时' : '专属补贴';
+    const label = labelOf(current, name);
+    badges.push(label);
+    promoDetails.push(label + '：' + rates(current));
+  }
+  const off = discount?.offPeak;
+  if (off && Number.isFinite(off.rate) && Array.isArray(off.windows) && off.windows.length) {
+    const label = labelOf(off, '闲时');
+    const clock = value => String(Math.floor(value / 60)).padStart(2, '0') + ':' + String(value % 60).padStart(2, '0');
+    const days = ['','周一','周二','周三','周四','周五','周六','周日'];
+    const groups = new Map();
+    for (const window of off.windows) {
+      const weekdays = window.weekdays || [];
+      const key = JSON.stringify(weekdays);
+      const label = key === '[1,2,3,4,5]' ? '周一至周五'
+        : key === '[6,7]' ? '周末' : weekdays.map(day => days[day]).filter(Boolean).join('、');
+      const group = groups.get(key) || { label, hours: [] };
+      group.hours.push(window.startMinute === 0 && window.endMinute === 1440 ? '全天'
+        : clock(window.startMinute) + '–' + clock(window.endMinute));
+      groups.set(key, group);
+    }
+    const hours = [...groups.values()].map(group => group.label + ' ' + group.hours.join('、')).join('；');
+    const zone = !off.timeZone || off.timeZone === 'Asia/Shanghai' ? '北京时间' : off.timeZone;
+    promoDetails.push(label + '：×' + off.beforeRate + ' → ×' + off.rate + '。' + hours + '（' + zone + '）');
+    if (rate === off.rate && !badges.includes(label)) badges.push(label);
+  }
+  const member = discount?.member;
+  if (member && Number.isFinite(member.rate)) {
+    promoDetails.push(labelOf(member, '会员价') + '：×' + member.rate + '，按账号会员资格适用。');
+  }
+  return { rate, badges, promoDetails };
+}
+
 function modelFacts(status, localBadges, nowMs) {
   const out = {};
   const models = status && Array.isArray(status.models) ? status.models : [];
@@ -1002,29 +1078,24 @@ function splitSessionByPeriod(sessionId) {
     target.output += Number(usage.outputTokens) || 0;
 
     // Same message, second tally: which model produced it and what it cost at THAT model's rate.
-    const source = rec.data && rec.data.message && rec.data.message.source;
-    const model = source && typeof source.model === 'string' && source.model !== '' ? source.model : 'unknown';
+    const source = rec.data?.message?.source ?? rec.data?.source;
+    const response = source?.replayState?.response;
+    const provider = response?.provider ?? source?.provider;
+    const bareModel = response?.model ?? source?.model ?? 'unknown';
+    const model = provider && provider !== 'workbuddy' ? provider + '/' + bareModel : bareModel;
     const row = perModel.get(model) || { model, messages: 0, tokens: 0, cny: 0, peakTokens: 0, offTokens: 0, peakCny: 0, offCny: 0 };
     row.messages += 1;
     row.tokens += tokens;
     const modelPeak = isPeakInstant(time);
-    const modelBook = priceBook(model);
-    const modelRate = modelPeak ? modelBook.peak : modelBook.off;
-    const modelCost = (
-      (Number(usage.inputTokens) || 0) * modelRate.input
-      + (Number(usage.cacheReadTokens) || 0) * modelRate.cacheHit
-      + (Number(usage.cacheWriteTokens) || 0) * modelRate.cacheWrite
-      + (Number(usage.outputTokens) || 0) * modelRate.output
-    ) / 1e6;
-    row.cny += modelCost;
-    // Split by pricing period: a model that ran across a peak boundary was charged two rates, and the
-    // card must show both rather than one blended figure.
+    const modelCost = quoteUsage(model, usage, time);
+    if (modelCost === null) { row.cny = null; row.unpricedCount = (row.unpricedCount || 0) + 1; }
+    else if (row.cny !== null) row.cny += modelCost;
     if (modelPeak) {
       row.peakTokens += tokens;
-      row.peakCny += modelCost;
+      row.peakCny = modelCost === null || row.peakCny === null ? null : row.peakCny + modelCost;
     } else {
       row.offTokens += tokens;
-      row.offCny += modelCost;
+      row.offCny = modelCost === null || row.offCny === null ? null : row.offCny + modelCost;
     }
     perModel.set(model, row);
   }
@@ -1136,8 +1207,8 @@ function round3(n) {
  * @param {string|undefined} sessionId
  */
 export const __test = {
-  reconcileAccounts, appendReconciliationLog, reportDiagnostic,
-  quoteUsage, estimateResponseCredit, payloadKey, readPayloadCache,
+  readTranscript, reconcileAccounts, appendReconciliationLog, reportDiagnostic,
+  traeModelRate, traeModelFacts, quoteUsage, estimateResponseCredit, payloadKey, readPayloadCache,
   isDeepseekPeak,
   discountInForce,
   localPromotionBadges,
@@ -1166,6 +1237,7 @@ async function refreshInBackground(base, requestKey, nowMs) {
   try {
     await buildBilling(base, {
       model: requestKey.model,
+      provider: requestKey.provider,
       sessions: Array.isArray(requestKey.sessions) ? requestKey.sessions.join(',') : undefined,
       fresh: '1',
       now: nowMs,
@@ -1194,6 +1266,7 @@ export async function buildBilling(base, q) {
   // ~830 ms for the network, which is why the first version never felt fast.
   const requestKey = {
     model: typeof q.model === 'string' ? q.model : undefined,
+    provider: typeof q.provider === 'string' ? q.provider : 'workbuddy',
     sessions: wanted,
     // The account is read from the persisted baselines, not from the bridge status: the cache check runs
     // before any round trip, so the status is not available yet.
@@ -1209,7 +1282,14 @@ export async function buildBilling(base, q) {
     }
   }
 
-  const status = await bridgeFirst(base, STATUS_SUFFIXES);
+  const traePanel = { trae: 'cn', 'trae-enterprise': 'enterprise', 'trae-global': 'ai' }[requestKey.provider];
+  let status;
+  if (traePanel) {
+    try {
+      const res = await fetch(base + '/plugins/dsh-connect-trae/usage?region=' + traePanel, { signal: AbortSignal.timeout(BRIDGE_TIMEOUT_MS) });
+      if (res.ok) status = await res.json();
+    } catch (error) { reportDiagnostic('trae-status-read', error); }
+  } else if (requestKey.provider === 'workbuddy') status = await bridgeFirst(base, STATUS_SUFFIXES);
 
   let models = {};
   let balance = null;
@@ -1218,8 +1298,16 @@ export async function buildBilling(base, q) {
   if (status !== undefined && status !== null) {
     signedIn = status.status === 'signed-in';
     domain = typeof status.domain === 'string' ? status.domain : null;
-    models = modelFacts(status, localPromotionBadges(nowMs), nowMs);
-    balance = balanceFact(status);
+    if (traePanel) {
+      models = Object.fromEntries((status.models || []).map(row => [row.id,
+        traePanel === 'cn' ? traeModelFacts(row, nowMs) : { badges: [] },
+      ]));
+      const available = status.credits?.generalAvailable;
+      balance = Number.isFinite(available) ? { total: available, unlimited: false, accounts: [] } : null;
+    } else {
+      models = modelFacts(status, localPromotionBadges(nowMs), nowMs);
+      balance = balanceFact(status);
+    }
   }
 
   // Pull the bridge's in-memory per-message spend (only present while this DSH
@@ -1276,6 +1364,7 @@ export async function buildBilling(base, q) {
 
   const built = {
     ok: true,
+    provider: requestKey.provider,
     creditMode: "exact-v2",
     reconciliation: readReconciliation(),
     signedIn,
@@ -1390,6 +1479,7 @@ export function apply(ctx) {
           const url = new URL(req.url, 'http://127.0.0.1');
           q = {
             model: url.searchParams.get('model') || undefined,
+            provider: url.searchParams.get('provider') || undefined,
             sessionId: url.searchParams.get('sessionId') || undefined,
             sessions: url.searchParams.get('sessions') || undefined,
             // Bypass the cache for this one request.

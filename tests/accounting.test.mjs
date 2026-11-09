@@ -65,3 +65,44 @@ test('turn credits deduplicate responses and replace estimates within each turn'
  records.set('b',{r:'b',c:4,t:101});
  assert.equal(summarizeSession(text,records,null,quote).turns[2].total,6);
 });
+
+
+test('credit conversion parameters are isolated by billing channel',()=>{
+ const usage={inputTokens:1000,outputTokens:10};
+ assert.equal(estimateCredit('deepseek-v4.1-flash',usage,100,quote).credits,1);
+ assert.equal(estimateCredit('workbuddy/deepseek-v4.1-flash',usage,100,quote).credits,1);
+ for(const provider of ['trae','trae-enterprise','trae-global']) {
+   assert.equal(estimateCredit(provider+'/deepseek-v4.1-flash',usage,100,quote),null);
+   const e=JSON.parse(event('id'));e.data.turn=1;e.data.message.source.replayState.response.provider=provider;
+   const text=JSON.stringify(e);
+   const first=summarizeSession(text,new Map(),null,quote,200);
+   assert.equal(first.estimated,0);assert.equal(first.unresolved,1);assert.equal(first.models[provider+'/deepseek-v4.1-flash'].tokens,1010);
+   const key=provider+'/id';const actual=summarizeSession(text,new Map([[key,{r:key,c:.06,t:100}]]),null,quote,200);
+   assert.equal(actual.actual,.06);assert.equal(actual.unresolved,0);assert.equal(actual.turns[1].total,.06);
+ }
+});
+
+
+test('unpriced currency stays unknown while tokens and actual credits are retained',()=>{
+ const e=JSON.parse(event('unpriced'));
+ e.data.message.source.replayState.response.provider='trae';
+ const rows=new Map([['trae/unpriced',{r:'trae/unpriced',c:2,t:100}]]);
+ const r=summarizeSession(JSON.stringify(e),rows,null,()=>null,200);
+ const model=r.models['trae/deepseek-v4.1-flash'];
+ assert.equal(r.actual,2);assert.equal(model.tokens,1010);
+ assert.equal(model.cny,null);assert.equal(model.unpricedCount,1);
+ assert.equal(r.todayModels['trae/deepseek-v4.1-flash'].cny,null);
+});
+
+
+test('missing WorkBuddy usage preserves priced responses and recorded credits in every scope',()=>{
+ const known=JSON.parse(event('priced'));known.data.turn=1;
+ const missing=JSON.parse(event('missing'));missing.data.turn=1;delete missing.data.usage;
+ const records=new Map([['priced',{r:'priced',c:2,t:100}]]);
+ const result=summarizeSession([known,missing].map(JSON.stringify).join('\n'),records,null,quote,200);
+ assert.equal(result.actual,2);assert.equal(result.unresolved,1);
+ for(const row of [result.models['deepseek-v4.1-flash'],result.todayModels['deepseek-v4.1-flash'],result.turns[1].models['deepseek-v4.1-flash']]) {
+  assert.equal(row.cny,0.07);assert.equal(row.tokens,1010);
+  assert.equal(row.missingUsageCount,1);assert.equal(row.unpricedCount,undefined);
+ }
+});
