@@ -135,7 +135,7 @@ window.__ModuleLoader__.load({
       'chart.sessionTodayCredits': 'Credits spent today',
       'credit.pending': '—',
       'credit.priceUnavailable': 'CNY price unavailable',
-      'summary.estimatePartial': 'Estimated cost (priced channels only)',
+      'summary.estimatePartial': 'Estimated cost',
       'credit.pendingDetail': 'Subtotal of recorded and estimated credits; some response credits remain unmatched',
       'chart.creditStatistics': 'Credit usage statistics',
       'chart.turnCredits': 'Turn credits',
@@ -166,7 +166,7 @@ window.__ModuleLoader__.load({
 
     const ZH = {
       'credit.priceUnavailable': '单价暂无依据',
-      'summary.estimatePartial': '费用估算（已知渠道）',
+      'summary.estimatePartial': '费用估算',
       'unit.cnyPerYiToken': '元/亿token',
       'chart.sessionScope': '本会话',
       'seg.speed': '生成速度',
