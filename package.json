@@ -1,6 +1,6 @@
 {
   "name": "dsh-token-statusbar-workbuddy",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "在 DSH 输入框下方显示会话用量，读取 WorkBuddy 响应积分记录，并按会话与模型汇总。",
   "type": "module",
   "license": "MIT",
@@ -76,7 +76,7 @@
     "build": "node scripts/build.mjs",
     "prepare": "npm run build",
     "pretest": "npm run build",
-    "test": "node --test tests/accounting.test.mjs tests/host.test.mjs tests/ui-contract.test.mjs tests/migration.test.mjs",
+    "test": "node --test tests/accounting.test.mjs tests/host.test.mjs tests/ui-contract.test.mjs tests/migration.test.mjs tests/performance.test.mjs",
     "check": "npm test && node scripts/check-package.mjs"
   },
   "repository": {

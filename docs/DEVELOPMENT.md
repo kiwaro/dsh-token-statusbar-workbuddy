@@ -7,13 +7,15 @@
 - src/reconciliation.js：执行余额采样、积分修订核对与日志轮转。
 - src/diagnostics.js：按操作类型限制诊断频率，输出操作名与错误码。
 - src/accounting.js：按响应编号归类、估算并累计积分。
+- src/billing-worker.js 和 src/billing-worker-entry.js：限制统计并发，在独立线程执行解压、统计和账本写入。
+- src/usage-transcript.js：读取会话并缓存精简用量字段，限制文件和缓存大小。
 - src/storage.js：定位数据目录，复制旧名称下的数据。
 - src/client.js：状态栏、设置、卡片与倍率图。
 - tests：使用合成数据验证计费、会话切换、界面约定和迁移。
 
 ## 构建与检查
 
-运行 npm run build 将七个源码文件复制到 lib。运行 npm run check 执行构建、测试和打包入口检查。项目使用 Node.js 内置模块，无需安装第三方运行依赖。lib 由构建生成，Git 保存 src 中的源码。
+运行 npm run build 将十个源码文件复制到 lib。运行 npm run check 执行构建、测试和打包入口检查。项目使用 Node.js 内置模块，无需安装第三方运行依赖。lib 由构建生成，Git 保存 src 中的源码。
 
 修改界面时保持现有分组与数值范围。倍率主轴以 1 为终点，超过 1 的部分显示超出比例。新增模型需同时核对价格表、估算条件与测试。
 

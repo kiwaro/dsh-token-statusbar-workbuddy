@@ -54,7 +54,12 @@ export function startBalanceSampler(intervalMs, resolveBase, readResponseCredits
    }
    if(!accounts.length || stopped)return;
    const records=readResponseCredits();
-   const next=reconcileAccounts(accounts,readReconciliation(),records,Date.now());
+   const previous=readReconciliation();
+   const next=reconcileAccounts(accounts,previous,records,Date.now());
+   // Keep the last persisted baseline when neither balance nor journal changed.
+   // The next changed sample still reconciles the full interval from that baseline.
+   if(Object.keys(next.accounts).length===Object.keys(previous.accounts).length &&
+      Object.entries(next.accounts).every(([id,value])=>previous.accounts[id]?.balance===value.balance && previous.accounts[id]?.journalTotal===value.journalTotal))return;
    fs.mkdirSync(storageDir(),{recursive:true});
    appendReconciliationLog(path.join(storageDir(),'account-reconciliation.jsonl'),next);
    const snapshotPath=reconciliationPath();

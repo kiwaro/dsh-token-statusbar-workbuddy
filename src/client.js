@@ -1133,6 +1133,7 @@ function fmtCredit(value) {
     const PERIOD_SPLIT_BY_SESSION = new Map();
     /** Sessions the poller currently refreshes on each tick. */
     const trackedSessions = new Set();
+    const sessionSubscribers = new Map();
     /** Guards the fallback session lookup so a tick cannot stack requests. */
     let adoptInflight = false;
     const billingWatchers = new Set();
@@ -1151,7 +1152,7 @@ const BILLING_ENDPOINTS = [
   '/plugins/dsh-token-statusbar-workbuddy/billing',
   '/api/dsh-token-statusbar-workbuddy/billing',
 ];
-    const BILLING_POLL_MS = 4000;
+    const BILLING_POLL_MS = 60000;
 
     function getBilling() {
       return BILLING;
@@ -1174,6 +1175,7 @@ const BILLING_ENDPOINTS = [
       ensureBillingPolling();
       return () => {
         billingWatchers.delete(listener);
+        if (!billingWatchers.size && billingTimer) {window.clearInterval(billingTimer);billingTimer=0;}
       };
     }
 
@@ -1190,7 +1192,7 @@ const BILLING_ENDPOINTS = [
     function ensureBillingPolling() {
       if (billingTimer !== 0 || typeof window === 'undefined') return;
       const tick = () => {
-        void refreshBilling();
+        if (!document.hidden) void refreshBilling();
       };
       tick();
       billingTimer = window.setInterval(tick, BILLING_POLL_MS);
@@ -1203,7 +1205,7 @@ const BILLING_ENDPOINTS = [
      * the in-flight request was built before this session was tracked, so its
      * reply cannot carry the new conversation's figures. The call therefore sets
      * `rerequest`, and the in-flight poll runs again once it finishes — one
-     * extra round trip instead of a stale bar that waits for the next 4s tick.
+     * extra round trip instead of a stale bar that waits for the next polling tick.
      */
     async function refreshBilling(sessionId) {
       if (typeof sessionId === 'string' && sessionId !== '') trackedSessions.add(sessionId);
@@ -1331,8 +1333,15 @@ const BILLING_ENDPOINTS = [
         void adoptActiveSession();
         return;
       }
+      sessionSubscribers.set(sessionId,(sessionSubscribers.get(sessionId)||0)+1);
       trackedSessions.add(sessionId);
-      void refreshBilling(sessionId);
+      if(sessionSubscribers.get(sessionId)===1) void refreshBilling(sessionId);
+      return () => {
+        const count=(sessionSubscribers.get(sessionId)||1)-1;
+        if(count>0){sessionSubscribers.set(sessionId,count);return;}
+        sessionSubscribers.delete(sessionId);trackedSessions.delete(sessionId);
+        CREDITS_BY_SESSION.delete(sessionId);PERIOD_SPLIT_BY_SESSION.delete(sessionId);
+      };
     }
 
     /**
@@ -2777,7 +2786,15 @@ const BILLING_ENDPOINTS = [
 
     function StatusBar(props) {
       const { useProjection, useChat, t, useStatusLocale, billing, sessionId } = props;
-      // Whether the figures on screen came from the disk cache. Shown as a marker: a number that may be
+      const visibilityRef=React.useRef(null);
+      const [visible,setVisible]=React.useState(()=>typeof IntersectionObserver==='undefined');
+      React.useEffect(()=>{
+        if(typeof IntersectionObserver==='undefined'){setVisible(true);return;}
+        const observer=new IntersectionObserver(entries=>setVisible(entries.some(entry=>entry.isIntersecting)));
+        if(visibilityRef.current)observer.observe(visibilityRef.current);
+        return()=>observer.disconnect();
+      },[]);
+      // Whether the figures on screen came from the in-memory cache. Shown as a marker: a number that may be
       // seconds old must not look identical to a freshly computed one.
       const fromCache = billing.get() && billing.get().fromCache === true;
       const locale = useStatusLocale((value) => value);
@@ -2812,17 +2829,17 @@ const BILLING_ENDPOINTS = [
 
       // Re-render whenever the shared billing snapshot refreshes.
       const [billingTick, setBillingTick] = React.useState(0);
-      React.useEffect(() => billing.subscribe(() => setBillingTick((n) => n + 1)), [billing]);
+      React.useEffect(() => visible ? billing.subscribe(() => setBillingTick((n) => n + 1)) : undefined, [billing, visible]);
 
       // Tell the Host which model is selected (for the picker's rate lookup) and
       // which conversation this is (to scope "this session" credits).
       const selModelId = selectionOf(modelSelection).model;
       React.useEffect(() => {
-        billing.noteSelectedModel(selModelId, selectionOf(modelSelection).provider);
-      }, [selModelId, selectionOf(modelSelection).provider, billing]);
+        if(visible) billing.noteSelectedModel(selModelId, selectionOf(modelSelection).provider);
+      }, [selModelId, selectionOf(modelSelection).provider, billing, visible]);
       React.useEffect(() => {
-        billing.noteSession(sessionId);
-      }, [sessionId, billing]);
+        if(visible) return billing.noteSession(sessionId);
+      }, [sessionId, billing, visible]);
 
       // One traversal yields both the session totals and the latest turn.
       const nodeSummary = React.useMemo(() => deriveNodeSummary(nodes), [nodes]);
@@ -3410,7 +3427,7 @@ const BILLING_ENDPOINTS = [
         null,
         h(
           'div',
-          { className: 'tsb-wrap' },
+          { className: 'tsb-wrap', ref: visibilityRef },
           h('span', { className: 'tsb-root', 'data-token-statusbar': '' }, children),
           hover !== null && tips[hover]
             ? h(HoverCard, { tip: tips[hover], t, anchorRef: hoveredAnchorRef })

@@ -15,3 +15,7 @@ Run npm run check to build and test. See the Chinese [accounting](docs/ACCOUNTIN
 ## Trae pricing limits
 
 Trae token usage and actual credits remain available independently. Without verifiable cache billing details and a CNY conversion, model rows show “CNY price unavailable” instead of public API list prices. Mixed-provider totals are labeled “Estimated cost (priced channels only)”; Trae-only sessions omit the CNY estimate.
+
+## Resource limits
+
+Accounting runs in a single worker with eight pending queries at most. Identical queries share a result, cached in memory for 60 seconds. Reproducible payloads are no longer persisted. Usage-only transcript caches exclude conversation bodies and are limited to 32 sessions / 16 MiB. Reads allow 64 MiB compressed input, 16 MiB per decompressed frame and 256 MiB total decoded data; the worker V8 old generation is limited to 256 MiB. Oversized sessions report unavailable without modifying source data. Historical credit imports are batched, corrections remain durable, hidden pages pause polling, only visible conversation bars subscribe, and unmounted bars release session caches. Account balances are sampled once a minute; unchanged balances and journal totals do not rewrite logs or snapshots.

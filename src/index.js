@@ -1,8 +1,9 @@
 /** Host: bridge catalog, per-response accounting, currency estimates, cache and account reconciliation. */
 import fs from 'node:fs';
-import zlib from 'node:zlib';
 import os from 'node:os';
 import path from 'node:path';
+import { BillingWorker } from './billing-worker.js';
+import { readUsageTranscript } from './usage-transcript.js';
 import { estimateCredit, parseJournal, summarizeSession, actualInWindow } from './accounting.js';
 import { dshHome, storageDir } from './storage.js';
 import { reportDiagnostic } from './diagnostics.js';
@@ -33,26 +34,8 @@ const LEDGER_VERSION = 1;
 
 
 
-/**
- * Payload cache, so a restart can paint before the network answers.
- *
- * Held per REQUEST, not globally: the status bar shows figures for a specific conversation and model, so
- * a single shared entry made one window display another's numbers (measured: a second conversation read
- * the first one's credit figure, and a two-conversation request came back missing the second).
- *
- * A cache that cannot be keyed correctly is worse than no cache: showing a wrong credit figure for the
- * user's own conversation is undetectable, while a slow number is merely slow.
- */
-/** Cache format version. Bumped when the key or payload shape changes, so old entries are discarded. */
-const CACHE_VERSION = 15;
-
-/** How long a cached payload stays usable. Credits accrue continuously, so this bounds how stale a
- *  figure can be, not just whether its pricing period still matches. */
+/** Per-request accounting results remain in bounded memory for one minute. */
 const CACHE_MAX_AGE_MS = 60000;
-
-function payloadCachePath() {
-  return path.join(storageDir(), 'payload-cache.json');
-}
 
 /**
  * The key a payload belongs to.
@@ -113,23 +96,18 @@ function payloadKey(request, nowMs) {
 }
 
 /**
- * Read the whole cache file, tolerating absence and damage.
+ * Return the bounded in-memory cache for the current data directory.
  *
  * @returns {{day: string, entries: Record<string, {at: number, payload: object}>}}
  */
+const PAYLOAD_CACHES = new Map();
 function readCacheFile() {
-  try {
-    const doc = JSON.parse(fs.readFileSync(payloadCachePath(), 'utf8'));
-    if (doc === null || typeof doc !== 'object' || typeof doc.entries !== 'object' || doc.entries === null) {
-      return { day: '', entries: {} };
-    }
-    // An older file may hold entries in a previous key or payload shape; drop them rather than serve
-    // figures whose meaning changed.
-    if (doc.version !== CACHE_VERSION) return { day: '', entries: {} };
-    return { day: typeof doc.day === 'string' ? doc.day : '', entries: doc.entries };
-  } catch (_error) {
-    return { day: '', entries: {} };
+  const key=storageDir();
+  if(!PAYLOAD_CACHES.has(key)){
+    if(PAYLOAD_CACHES.size>=4)PAYLOAD_CACHES.delete(PAYLOAD_CACHES.keys().next().value);
+    PAYLOAD_CACHES.set(key,{day:'',entries:{}});
   }
+  return PAYLOAD_CACHES.get(key);
 }
 
 /**
@@ -163,7 +141,7 @@ function readPayloadCache(request, nowMs) {
 }
 
 /**
- * Store a payload for one request.
+ * Cache a payload in memory for one request.
  *
  * Only that request's own entry is written. An earlier version replaced the whole file, so a
  * request without a session list overwrote a keyed entry with empty per-session figures — the bar then
@@ -201,17 +179,13 @@ function writePayloadCache(request, payload, nowMs) {
     for (const stale of keys.slice(0, keys.length - LIMIT)) delete entries[stale];
   }
 
-  try {
-    fs.mkdirSync(storageDir(), { recursive: true });
-    // Write to a temporary file and rename: a crash mid-write must not leave a truncated JSON that turns
-    // every later start into a cold start.
-    const target = payloadCachePath();
-    const temp = target + '.tmp';
-    fs.writeFileSync(temp, JSON.stringify({ version: CACHE_VERSION, day, entries }), 'utf8');
-    fs.renameSync(temp, target);
-  } catch (_error) {
-    /* a failing disk must not break the caller */
+  // This cache is reproducible. Keep it in the bounded worker instead of rewriting it on disk.
+  let bytes=Buffer.byteLength(JSON.stringify(entries));
+  while(bytes>4*1024*1024&&Object.keys(entries).length){
+    delete entries[Object.keys(entries).sort((a,b)=>(entries[a].at||0)-(entries[b].at||0))[0]];
+    bytes=Buffer.byteLength(JSON.stringify(entries));
   }
+  PAYLOAD_CACHES.set(storageDir(),{day,entries});
 }
 
 
@@ -241,9 +215,9 @@ function readResponseCredits({ strict = false } = {}) {
 }
 function importExactCredits(ledger, sessionId, readings = readResponseCredits(), now = Date.now()) {
   const file = sessionLogPath(sessionId);
-  const summary = summarizeSession(file ? readTranscript(file) : '', readings, sessionCreatedAt(sessionId), quoteUsage, now, isPeakInstant);
+  const summary = summarizeSession(file ? readUsageTranscript(file) : '', readings, sessionCreatedAt(sessionId), quoteUsage, now, isPeakInstant);
   if (summary.checked >= 5 && summary.mismatch / summary.checked >= 0.25) reportDiagnostic('credit-calibration-review', {code:'EDRIFT'});
-  for (const record of summary.actualRecords) appendLedger(ledger, sessionId, { [record.r]: record.c }, record.t);
+  appendLedgerRecords(ledger, sessionId, summary.actualRecords);
   const { actualRecords, ...coverage } = summary;
   return coverage;
 }
@@ -900,40 +874,6 @@ function sessionLogPath(sessionId) {
   return null;
 }
 
-/**
- * Decompress a transcript, which is stored as concatenated zstd frames.
- *
- * @param {string} file
- * @returns {string} The concatenated plain text, or '' when unreadable.
- */
-function readTranscript(file) {
-  let buf;
-  try {
-    buf = fs.readFileSync(file);
-  } catch (_error) {
-    return '';
-  }
-  const MAGIC = [0x28, 0xb5, 0x2f, 0xfd];
-  const starts = [];
-  for (let i = 0; i < buf.length - 3; i++) {
-    if (buf[i] === MAGIC[0] && buf[i + 1] === MAGIC[1] && buf[i + 2] === MAGIC[2] && buf[i + 3] === MAGIC[3]) {
-      starts.push(i);
-    }
-  }
-  if (starts.length === 0) return '';
-  const parts = [];
-  for (let f = 0; f < starts.length; f++) {
-    const from = starts[f];
-    const to = f + 1 < starts.length ? starts[f + 1] : buf.length;
-    try {
-      parts.push(zlib.zstdDecompressSync(buf.subarray(from, to)).toString('utf8'));
-    } catch (_error) {
-      /* a damaged frame must not discard the rest */
-    }
-  }
-  return parts.join('\n');
-}
-
 /** Parsed transcripts, keyed by path, so a poll does not decompress the same log twice. */
 const TRANSCRIPT_CACHE = new Map();
 
@@ -1004,6 +944,7 @@ function splitSessionByPeriod(sessionId) {
       return null;
     }
     cached = { stamp, split: null };
+    if (TRANSCRIPT_CACHE.size >= 32) TRANSCRIPT_CACHE.delete(TRANSCRIPT_CACHE.keys().next().value);
     TRANSCRIPT_CACHE.set(file, cached);
   }
 
@@ -1017,7 +958,7 @@ function splitSessionByPeriod(sessionId) {
   if (cached.split !== null && currentStamp === cached.stamp && cached.calendarKey === calendarKey) return cached.split;
 
   cached.calendarKey = calendarKey;
-  const text = readTranscript(file);
+  const text = readUsageTranscript(file);
   if (text === '') return null;
 
   // A fork's transcript carries the parent's messages as inherited history, which was already
@@ -1160,23 +1101,20 @@ function readLedger() {
 }
 
 /** Append only the records not already in the ledger. Returns how many were new. */
-function appendLedger(known, sessionId, credits, nowMs) {
-  const fresh = [];
-  for (const [responseId, credit] of Object.entries(credits || {})) {
-    if (typeof credit !== 'number' || !Number.isFinite(credit)) continue;
-    const key = sessionId + '\u0000' + responseId;
-    if (known.has(key)) continue;
-    fresh.push(JSON.stringify({ v: LEDGER_VERSION, s: sessionId, r: responseId, c: credit, t: nowMs }));
+function appendLedgerRecords(known, sessionId, records) {
+  const fresh = new Map();
+  for (const record of records) {
+    if (typeof record.r !== 'string' || !Number.isFinite(record.c) || record.c < 0 || !Number.isFinite(record.t)) continue;
+    const key = sessionId + '\u0000' + record.r;
+    const old = known.get(key);
+    if (old && old.c === record.c && old.t === record.t) continue;
+    fresh.set(key, {v:LEDGER_VERSION,s:sessionId,r:record.r,c:record.c,t:record.t});
   }
-  if (fresh.length === 0) return 0;
-  try {
-    fs.mkdirSync(storageDir(), { recursive: true });
-    fs.appendFileSync(ledgerPath(), fresh.join('\n') + '\n', 'utf8');
-    for (const line of fresh) { const row=JSON.parse(line); known.set(row.s+'\u0000'+row.r,{c:row.c,t:row.t}); }
-  } catch (_error) {
-    /* a failing disk must not break the status bar */
-  }
-  return fresh.length;
+  if (!fresh.size) return 0;
+  fs.mkdirSync(storageDir(), { recursive: true });
+  fs.appendFileSync(ledgerPath(), [...fresh.values()].map(JSON.stringify).join('\n')+'\n', {encoding:'utf8',mode:0o600});
+  for (const [key,row] of fresh) known.set(key,{c:row.c,t:row.t});
+  return fresh.size;
 }
 
 /** CST (UTC+8) calendar day key. */
@@ -1207,7 +1145,7 @@ function round3(n) {
  * @param {string|undefined} sessionId
  */
 export const __test = {
-  readTranscript, reconcileAccounts, appendReconciliationLog, reportDiagnostic,
+  readTranscript:readUsageTranscript, appendLedgerRecords, readLedger, reconcileAccounts, appendReconciliationLog, reportDiagnostic,
   traeModelRate, traeModelFacts, quoteUsage, estimateResponseCredit, payloadKey, readPayloadCache,
   isDeepseekPeak,
   discountInForce,
@@ -1217,37 +1155,6 @@ export const __test = {
   sessionCreatedAt,
   isPeakInstant,
 };
-
-/** Whether a background refresh is already running, so a burst of requests does not stack them. */
-let REFRESHING = false;
-
-/**
- * Recompute the payload without blocking the caller.
- *
- * Called when a cached payload was served. The result lands in the cache, so the next request picks it
- * up; sampling the balance here also keeps the ledger filling while cached figures are on screen.
- *
- * @param {string} base - host origin.
- * @param {object} q - the original query, with the cache hint removed.
- * @returns {Promise<void>}
- */
-async function refreshInBackground(base, requestKey, nowMs) {
-  if (REFRESHING) return;
-  REFRESHING = true;
-  try {
-    await buildBilling(base, {
-      model: requestKey.model,
-      provider: requestKey.provider,
-      sessions: Array.isArray(requestKey.sessions) ? requestKey.sessions.join(',') : undefined,
-      fresh: '1',
-      now: nowMs,
-    });
-  } catch (_error) {
-    /* the cache stays; the next attempt will try again */
-  } finally {
-    REFRESHING = false;
-  }
-}
 
 export async function buildBilling(base, q) {
   const nowMs = typeof q.now === 'number' && Number.isFinite(q.now) ? q.now : Date.now();
@@ -1260,6 +1167,7 @@ export async function buildBilling(base, q) {
       if (id !== '' && !wanted.includes(id)) wanted.push(id);
     }
   }
+  if (wanted.length > 64 || wanted.some(id => !/^[A-Za-z0-9_.:-]{1,128}$/.test(id))) throw new Error('session-limit');
   const sessionId = wanted.length > 0 ? wanted[0] : undefined;
 
   // Check the cache BEFORE any round trip. Placing it after the bridge call meant a hit still waited
@@ -1277,7 +1185,7 @@ export async function buildBilling(base, q) {
     const cached = readPayloadCache(requestKey, nowMs);
     if (cached !== null) {
       // Refresh after replying, so the cached figures are on screen while the work happens.
-      setImmediate(() => { void refreshInBackground(base, requestKey, nowMs); });
+      // Recompute after the one-minute cache expires; a cache hit performs no background rebuild.
       return { ...cached, fromCache: true };
     }
   }
@@ -1468,6 +1376,8 @@ export function apply(ctx) {
     };
     ctx.effect(() => startBalanceSampler(60000, resolveBase, () => readResponseCredits({strict:true})), 'dsh-token-statusbar-workbuddy: balance reconciliation');
 
+    const billingWorker = new BillingWorker();
+    scope.effect(() => () => billingWorker.close());
     const stop = scope.webServer.register({
       kind: 'exact',
       // `/api/...` is fenced by the host's route guard (even nonexistent paths 401),
@@ -1482,20 +1392,18 @@ export function apply(ctx) {
             provider: url.searchParams.get('provider') || undefined,
             sessionId: url.searchParams.get('sessionId') || undefined,
             sessions: url.searchParams.get('sessions') || undefined,
-            // Bypass the cache for this one request.
-            fresh: url.searchParams.get('fresh') || undefined,
           };
         } catch (_error) {
           q = {};
         }
-        buildBilling(selfBaseFrom(req), q)
+        billingWorker.request(selfBaseFrom(req), q)
           .then((payload) => {
             res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
             res.end(JSON.stringify(payload));
           })
           .catch((error) => {
             res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
-            res.end(JSON.stringify({ ok: false, models: {}, balance: null, credits: { session: 0, today: 0 }, error: String(error && error.message) }));
+            res.end(JSON.stringify({ ok: false, models: {}, balance: null, credits: { session: 0, today: 0 }, error: 'billing-unavailable' }));
           });
       },
     });
