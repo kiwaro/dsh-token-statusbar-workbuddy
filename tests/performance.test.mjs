@@ -79,3 +79,17 @@ test('unchanged balance samples do not write; later credit corrections persist',
   assert.equal(fs.readFileSync(log,'utf8').trim().split('\n').length,2);
  }finally{stop();globalThis.fetch=originalFetch;fs.rmSync(root,{recursive:true,force:true});}
 });
+
+
+test('idle accounting worker exits and a later request starts a new worker',async()=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'statusbar-worker-idle-'));process.env.DSH_HOME=root;
+ const server=http.createServer((req,res)=>{res.setHeader('content-type','application/json');res.end(JSON.stringify({status:'signed-in',models:[]}));});
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));
+ const worker=new BillingWorker({idleMs:20}),base='http://127.0.0.1:'+server.address().port;
+ try{
+  await worker.request(base,{});const first=worker.worker;assert(first);
+  await new Promise(r=>setTimeout(r,80));assert.equal(worker.worker,null);assert.equal(worker.pending.size,0);
+  await worker.request(base,{});assert(worker.worker);assert.notEqual(worker.worker,first);
+  worker.close();assert.equal(worker.idleTimer,null);await assert.rejects(worker.request(base,{}),/closed/);
+ }finally{worker.close();await new Promise(r=>server.close(r));fs.rmSync(root,{recursive:true,force:true});}
+});
